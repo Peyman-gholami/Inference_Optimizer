@@ -1,68 +1,46 @@
 import numpy as np
 from scipy.optimize import minimize
-from typing import Dict, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 from src.optimizers.base import BaseOptimizer
 from src.core.task import InferenceTask
+
 
 class CSIAwareSingleTaskOptimizer(BaseOptimizer):
     """
     Implements the closed-form optimal solution for a single task with perfect CSI (Problem 1).
     """
     def check_feasibility(self, t: int, c_t: np.ndarray) -> bool:
-        """
-        Implements Lemma 3.1 (Single-Task Feasibility Condition).
-        """
-        # In a single-task setup, we assume self.tasks[0] is the only task
+        [cite_start]"""Implements Lemma 3.1 (Single-Task Feasibility Condition)[cite: 88]."""
         task = self.tasks[0]
         R_t = task.get_R_k(t)
 
-        # Condition 3: Check computation delay bounds
-        for i in range(task.b_k, task.e_k + 1):
-            if task.tau[i] > 1.0 / R_t:
-                return False
+        # [cite_start]Condition 3: Check computation delay bounds [cite: 90]
+        if any(task.tau[i] > 1.0 / R_t for i in range(task.b_k, task.e_k + 1)):
+            return False
 
-        # Condition 4: Check communication delay bounds
-        for i in range(task.b_k, task.e_k):
-            if (task.a[i] * task.eta_min[i]) / c_t[i] > 1.0 / R_t:
-                return False
+        # [cite_start]Condition 4: Check communication delay bounds [cite: 90]
+        if any((task.a[i] * task.eta_min[i]) / c_t[i] > 1.0 / R_t for i in range(task.b_k, task.e_k)):
+            return False
 
         return True
 
     def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
-        """
-        Implements Theorem 3.2 (Closed-Form Optimal Solution).
-        """
+        [cite_start]"""Implements Theorem 3.2 (Closed-Form Optimal Solution)[cite: 105]."""
         if not self.check_feasibility(t, c_t):
             return None
 
         task = self.tasks[0]
         R_t = task.get_R_k(t)
 
-        eta = {}
-        s_comp = {}
-        s_comm = {}
+        # [cite_start]Apply Theorem 3.2: \eta_i^*(t) = min(1, c_i(t) / (R(t) * a_i)) [cite: 106]
+        eta = np.array([min(1.0, c_t[i] / (R_t * task.a[i])) for i in range(task.b_k, task.e_k)])
+        
+        # Resources are fully allocated to the single task
+        s_comp = np.ones(task.L_k)
+        s_comm = np.ones(task.L_k - 1)
 
-        # Computation processing logic (Nodes)
-        for i in range(task.b_k, task.e_k + 1):
-            s_comp[i] = 1.0  # Receives full node capacity
-
-        # Communication transmission logic (Links)
-        for i in range(task.b_k, task.e_k):
-            s_comm[i] = 1.0  # Receives full link capacity
-            
-            # Apply Theorem 3.2: \eta_i^*(t) = min(1, c_i(t) / (R(t) * a_i))
-            eta_opt = min(1.0, c_t[i] / (R_t * task.a[i]))
-            eta[i] = eta_opt
-
-        # Format into the expected nested dictionary
-        return {
-            task.task_id: {
-                'eta': np.array([eta[i] for i in range(task.b_k, task.e_k)]),
-                's_comp': np.array([s_comp[i] for i in range(task.b_k, task.e_k + 1)]),
-                's_comm': np.array([s_comm[i] for i in range(task.b_k, task.e_k)])
-            }
-        }
+        return {task.task_id: {'eta': eta, 's_comp': s_comp, 's_comm': s_comm}}
 
 
 class CSIAwareMultiTaskOptimizer(BaseOptimizer):
@@ -70,158 +48,165 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
     Implements the convex optimization solver for multiple tasks with perfect CSI (Problem 2).
     """
     def check_feasibility(self, t: int, c_t: np.ndarray) -> bool:
-        """
-        Implements Lemma 3.3 (Multi-Task Feasibility Condition).
-        """
-        # Condition (14): Check computation sums at every node i in [M]
+        [cite_start]"""Implements Lemma 3.3 (Multi-Task Feasibility Condition)[cite: 157]."""
+        # [cite_start]Condition (14): Check computation sums at every node [cite: 158]
         for i in range(self.M):
-            node_comp_sum = 0.0
-            for task in self.tasks:
-                if task.is_active_at_node(i):
-                    node_comp_sum += task.tau[i] * task.get_R_k(t)
-            if node_comp_sum > 1.0:
+            comp_sum = sum(task.tau[i] * task.get_R_k(t) for task in self.tasks if task.is_active_at_node(i))
+            if comp_sum > 1.0:
                 return False
 
-        # Condition (15): Check communication sums at every link i in [M-1]
+        # [cite_start]Condition (15): Check communication sums at every link [cite: 159]
         for i in range(self.M - 1):
-            link_comm_sum = 0.0
-            for task in self.tasks:
-                if task.is_active_on_link(i):
-                    R_k = task.get_R_k(t)
-                    link_comm_sum += (task.a[i] * task.eta_min[i] * R_k) / c_t[i]
-            if link_comm_sum > 1.0:
+            comm_sum = sum(
+                (task.a[i] * task.eta_min[i] * task.get_R_k(t)) / c_t[i]
+                for task in self.tasks if task.is_active_on_link(i)
+            )
+            if comm_sum > 1.0:
                 return False
 
         return True
 
-    def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
-        """
-        Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4).
-        Solves using SciPy SLSQP and piecewise chain-rule KKT gradients.
-        """
-        if not self.check_feasibility(t, c_t):
-            return None
+    # ==========================================
+    # FUNCTIONAL HELPERS FOR SCI-PY SOLVER
+    # ==========================================
 
-        # 1. Map active link-task pairs to a 1D flat array for SciPy
-        # active_vars[idx] = (link_i, task_k)
-        active_vars = []
-        bounds = []
-        x0 = []
-        
+    def _build_context(self, t: int, c_t: np.ndarray) -> List[Dict[str, Any]]:
+        """Maps active task-link pairs to a flat list to interface with SciPy's 1D arrays."""
+        context = []
         for task in self.tasks:
             R_k = task.get_R_k(t)
             for i in range(task.b_k, task.e_k):
-                active_vars.append((i, task))
-                
-                # Minimum viable bandwidth s_{i,k}^{min}(t)
-                s_min = (task.a[i] * task.eta_min[i] * R_k) / c_t[i]
-                bounds.append((s_min, 1.0))
-                x0.append(s_min) # Start strictly feasible
+                [cite_start]beta = c_t[i] / (R_k * task.a[i]) # Derivative term [cite: 208]
+                [cite_start]s_min = (task.a[i] * task.eta_min[i] * R_k) / c_t[i] # Minimum bandwidth [cite: 205]
+                context.append({
+                    'task': task,
+                    'link_i': i,
+                    'beta': beta,
+                    's_min': s_min
+                })
+        return context
 
-        N_vars = len(active_vars)
+    def _calculate_eta_and_derivative(self, s_val: float, beta: float) -> Tuple[float, float]:
+        [cite_start]"""Evaluates the compression factor and its piecewise derivative[cite: 208, 209]."""
+        eta_val = min(1.0, beta * s_val)
+        d_eta_ds = 0.0 if np.isclose(eta_val, 1.0) else beta
+        return eta_val, d_eta_ds
 
-        # 2. Define the Objective and Gradient
-        def objective(s_flat: np.ndarray):
-            total_obj = 0.0
-            grad_flat = np.zeros(N_vars)
+    def _evaluate_objective(self, s_flat: np.ndarray, context: List[Dict[str, Any]]) -> Tuple[float, np.ndarray]:
+        [cite_start]"""Calculates the objective function and flat gradient array using the chain rule[cite: 133, 208]."""
+        total_obj = 0.0
+        grad_flat = np.zeros_like(s_flat)
+
+        # 1. Group the flat array back into vectors per task
+        for task in self.tasks:
+            # Find indices in the flat array that belong to this task
+            task_indices = [idx for idx, ctx in enumerate(context) if ctx['task'] == task]
             
-            # Reconstruct the s_comm dictionary grouped by task to evaluate A_k
-            task_s_comm = {task.task_id: {} for task in self.tasks}
-            task_eta = {task.task_id: {} for task in self.tasks}
-            
-            for idx, (i, task) in enumerate(active_vars):
-                task_s_comm[task.task_id][i] = s_flat[idx]
-            
-            # Evaluate objective and gradients per task
-            for task in self.tasks:
-                R_k = task.get_R_k(t)
-                eta_vec = []
-                grad_map = {} # Maps link i to its chain-rule derivative factor
-                
-                for i in range(task.b_k, task.e_k):
-                    s_val = task_s_comm[task.task_id][i]
-                    beta = c_t[i] / (R_k * task.a[i])
-                    
-                    # Calculate eta_{i,k} (Theorem 3.4)
-                    eta_val = min(1.0, beta * s_val)
-                    eta_vec.append(eta_val)
-                    task_eta[task.task_id][i] = eta_val
-                    
-                    # Piecewise chain rule derivative logic
-                    if np.isclose(eta_val, 1.0):
-                        grad_map[i] = 0.0
-                    else:
-                        grad_map[i] = beta
-                
-                eta_array = np.array(eta_vec)
-                
-                # Black-box calls
-                acc = task.A_k(eta_array)
-                grad_acc = task.grad_A_k(eta_array)
-                
-                total_obj += task.w_k * acc
-                
-                # Apply chain rule and map back to flat array
-                vec_idx = 0
-                for i in range(task.b_k, task.e_k):
-                    # Find where this (i, task) lives in the flat array
-                    flat_idx = active_vars.index((i, task))
-                    
-                    # Chain rule: w_k * (d_A/d_eta) * (d_eta/d_s)
-                    d_eta_ds = grad_map[i]
-                    grad_flat[flat_idx] = task.w_k * grad_acc[vec_idx] * d_eta_ds
-                    vec_idx += 1
+            if not task_indices:
+                continue
 
-            # SciPy MINIMIZES, so return negative objective and negative gradient
-            return -total_obj, -grad_flat
+            eta_vec = []
+            d_eta_ds_vec = []
 
-        # 3. Define the Link Capacity Constraints (Sum of s <= 1 per link)
+            # 2. Calculate eta and inner derivatives for this task
+            for idx in task_indices:
+                s_val = s_flat[idx]
+                beta = context[idx]['beta']
+                eta_val, d_eta_ds = self._calculate_eta_and_derivative(s_val, beta)
+                
+                eta_vec.append(eta_val)
+                d_eta_ds_vec.append(d_eta_ds)
+
+            eta_array = np.array(eta_vec)
+
+            # 3. Call the black box
+            acc = task.A_k(eta_array)
+            grad_acc = task.grad_A_k(eta_array)
+
+            total_obj += task.w_k * acc
+
+            # 4. Apply the chain rule and map back to the flat gradient array
+            for local_idx, flat_idx in enumerate(task_indices):
+                chain_rule_grad = task.w_k * grad_acc[local_idx] * d_eta_ds_vec[local_idx]
+                grad_flat[flat_idx] = chain_rule_grad
+
+        # SciPy minimizes, so return negative values to maximize
+        return -total_obj, -grad_flat
+
+    def _build_constraints(self, context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        [cite_start]"""Generates the linear capacity constraints for each link: sum(s) <= 1[cite: 138]."""
         constraints = []
         for link_i in range(self.M - 1):
-            # Check if any tasks use this link to avoid empty constraints
-            if any(var[0] == link_i for var in active_vars):
-                # The function must be >= 0, so 1.0 - sum(s) >= 0
+            # Find all flat indices that operate on this specific link
+            indices_on_link = [idx for idx, ctx in enumerate(context) if ctx['link_i'] == link_i]
+            
+            if indices_on_link:
+                # 1.0 - sum(s) >= 0 ensures sum(s) <= 1
                 constraints.append({
                     'type': 'ineq',
-                    'fun': lambda x, l_i=link_i: 1.0 - sum(
-                        x[idx] for idx, var in enumerate(active_vars) if var[0] == l_i
-                    )
+                    'fun': lambda s_flat, idxs=indices_on_link: 1.0 - sum(s_flat[i] for i in idxs)
                 })
+        return constraints
 
-        # 4. Solve the convex optimization problem
+    def _pack_results(self, t: int, c_t: np.ndarray, s_flat: np.ndarray, context: List[Dict[str, Any]]) -> Dict[int, Dict[str, np.ndarray]]:
+        """Unpacks the optimized 1D array back into the final operational dictionary."""
+        final_allocations = {}
+        for task in self.tasks:
+            R_k = task.get_R_k(t)
+            
+            # [cite_start]Compute shares are decoupled and set directly based on QoS [cite: 189]
+            s_comp = np.array([task.tau[i] * R_k for i in range(task.b_k, task.e_k + 1)])
+            
+            task_indices = [idx for idx, ctx in enumerate(context) if ctx['task'] == task]
+            
+            s_comm = []
+            eta = []
+            
+            for idx in task_indices:
+                s_val = s_flat[idx]
+                beta = context[idx]['beta']
+                eta_val, _ = self._calculate_eta_and_derivative(s_val, beta)
+                
+                s_comm.append(s_val)
+                eta.append(eta_val)
+
+            final_allocations[task.task_id] = {
+                'eta': np.array(eta),
+                's_comp': s_comp,
+                's_comm': np.array(s_comm)
+            }
+            
+        return final_allocations
+
+    # ==========================================
+    # MAIN OPTIMIZE METHOD
+    # ==========================================
+
+    def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
+        [cite_start]"""Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
+        if not self.check_feasibility(t, c_t):
+            return None
+
+        # 1. Map physical layout to 1D solver space
+        context = self._build_context(t, c_t)
+        
+        # 2. Setup bounds and initial guess (start at s_min)
+        bounds = [(ctx['s_min'], 1.0) for ctx in context]
+        x0 = np.array([ctx['s_min'] for ctx in context])
+
+        # 3. Setup link capacity constraints
+        constraints = self._build_constraints(context)
+
+        # 4. Execute SLSQP solver
         result = minimize(
-            fun=objective,
-            x0=np.array(x0),
+            fun=self._evaluate_objective,
+            x0=x0,
+            args=(context,),
             method='SLSQP',
             jac=True,
             bounds=bounds,
             constraints=constraints
         )
 
-        # 5. Unpack results into the standardized output format
-        final_allocations = {}
-        for task in self.tasks:
-            R_k = task.get_R_k(t)
-            
-            # The computation variables s^{comp} are decoupled and calculated directly
-            s_comp_opt = np.array([task.tau[i] * R_k for i in range(task.b_k, task.e_k + 1)])
-            
-            s_comm_opt = []
-            eta_opt = []
-            
-            for i in range(task.b_k, task.e_k):
-                flat_idx = active_vars.index((i, task))
-                s_val = result.x[flat_idx]
-                s_comm_opt.append(s_val)
-                
-                # Recalculate final eta
-                eta_val = min(1.0, (c_t[i] / (R_k * task.a[i])) * s_val)
-                eta_opt.append(eta_val)
-
-            final_allocations[task.task_id] = {
-                'eta': np.array(eta_opt),
-                's_comp': s_comp_opt,
-                's_comm': np.array(s_comm_opt)
-            }
-
-        return final_allocations
+        # 5. Map 1D solver output back to physical layout
+        return self._pack_results(t, c_t, result.x, context)
