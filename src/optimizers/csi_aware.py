@@ -11,7 +11,7 @@ class CSIAwareSingleTaskOptimizer(BaseOptimizer):
     Implements the closed-form optimal solution for a single task with perfect CSI (Problem 1).
     """
     def check_feasibility(self, t: int, c_t: np.ndarray) -> bool:
-        [cite_start]"""Implements Lemma 3.1 (Single-Task Feasibility Condition)[cite: 88]."""
+        """Implements Lemma 3.1 (Single-Task Feasibility Condition)[cite: 88]."""
         task = self.tasks[0]
         R_t = task.get_R_k(t)
 
@@ -26,7 +26,7 @@ class CSIAwareSingleTaskOptimizer(BaseOptimizer):
         return True
 
     def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
-        [cite_start]"""Implements Theorem 3.2 (Closed-Form Optimal Solution)[cite: 105]."""
+        """Implements Theorem 3.2 (Closed-Form Optimal Solution)[cite: 105]."""
         if not self.check_feasibility(t, c_t):
             return None
 
@@ -48,7 +48,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
     Implements the convex optimization solver for multiple tasks with perfect CSI (Problem 2).
     """
     def check_feasibility(self, t: int, c_t: np.ndarray) -> bool:
-        [cite_start]"""Implements Lemma 3.3 (Multi-Task Feasibility Condition)[cite: 157]."""
+        """Implements Lemma 3.3 (Multi-Task Feasibility Condition)[cite: 157]."""
         # [cite_start]Condition (14): Check computation sums at every node [cite: 158]
         for i in range(self.M):
             comp_sum = sum(task.tau[i] * task.get_R_k(t) for task in self.tasks if task.is_active_at_node(i))
@@ -76,8 +76,8 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         for task in self.tasks:
             R_k = task.get_R_k(t)
             for i in range(task.b_k, task.e_k):
-                [cite_start]beta = c_t[i] / (R_k * task.a[i]) # Derivative term [cite: 208]
-                [cite_start]s_min = (task.a[i] * task.eta_min[i] * R_k) / c_t[i] # Minimum bandwidth [cite: 205]
+                beta = c_t[i] / (R_k * task.a[i]) # Derivative term [cite: 208]
+                s_min = (task.a[i] * task.eta_min[i] * R_k) / c_t[i] # Minimum bandwidth [cite: 205]
                 context.append({
                     'task': task,
                     'link_i': i,
@@ -87,13 +87,13 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         return context
 
     def _calculate_eta_and_derivative(self, s_val: float, beta: float) -> Tuple[float, float]:
-        [cite_start]"""Evaluates the compression factor and its piecewise derivative[cite: 208, 209]."""
+        """Evaluates the compression factor and its piecewise derivative[cite: 208, 209]."""
         eta_val = min(1.0, beta * s_val)
         d_eta_ds = 0.0 if np.isclose(eta_val, 1.0) else beta
         return eta_val, d_eta_ds
 
     def _evaluate_objective(self, s_flat: np.ndarray, context: List[Dict[str, Any]]) -> Tuple[float, np.ndarray]:
-        [cite_start]"""Calculates the objective function and flat gradient array using the chain rule[cite: 133, 208]."""
+        """Calculates the objective function and flat gradient array using the chain rule[cite: 133, 208]."""
         total_obj = 0.0
         grad_flat = np.zeros_like(s_flat)
 
@@ -134,7 +134,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         return -total_obj, -grad_flat
 
     def _build_constraints(self, context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        [cite_start]"""Generates the linear capacity constraints for each link: sum(s) <= 1[cite: 138]."""
+        """Generates the linear capacity constraints for each link: sum(s) <= 1[cite: 138]."""
         constraints = []
         for link_i in range(self.M - 1):
             # Find all flat indices that operate on this specific link
@@ -154,7 +154,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         for task in self.tasks:
             R_k = task.get_R_k(t)
             
-            # [cite_start]Compute shares are decoupled and set directly based on QoS [cite: 189]
+            # Compute shares are decoupled and set directly based on QoS [cite: 189]
             s_comp = np.array([task.tau[i] * R_k for i in range(task.b_k, task.e_k + 1)])
             
             task_indices = [idx for idx, ctx in enumerate(context) if ctx['task'] == task]
@@ -183,7 +183,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
     # ==========================================
 
     def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
-        [cite_start]"""Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
+            """Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
         if not self.check_feasibility(t, c_t):
             return None
 
