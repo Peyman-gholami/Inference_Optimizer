@@ -183,7 +183,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
     # ==========================================
 
     def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
-            """Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
+        """Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
         if not self.check_feasibility(t, c_t):
             return None
 
