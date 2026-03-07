@@ -180,7 +180,7 @@ def test_csi_aware_multi_task_optimization(dummy_task_factory):
 
     # 3. Verify eta calculation matches Theorem 3.4 [cite: 182]
     # eta = min(1.0, (c / (R * a)) * s_comm)
-    beta = 500.0 / (10.0 * 10.0) # c / (R * a) = 0.5
+    beta = 50.0 / (10.0 * 10.0) # c / (R * a) = 0.5
     expected_eta_t1 = np.minimum(1.0, beta * s_comm_t1)
     
     np.testing.assert_allclose(res[1]['eta'], expected_eta_t1)

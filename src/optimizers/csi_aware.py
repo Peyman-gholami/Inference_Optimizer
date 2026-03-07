@@ -46,16 +46,17 @@ class CSIAwareSingleTaskOptimizer(BaseOptimizer):
 class CSIAwareMultiTaskOptimizer(BaseOptimizer):
     """
     Implements the convex optimization solver for multiple tasks with perfect CSI (Problem 2).
+    Updated to use the reformulated smooth problem bounded strictly by s_max.
     """
     def check_feasibility(self, t: int, c_t: np.ndarray) -> bool:
         """Implements Lemma 3.3 (Multi-Task Feasibility Condition)[cite: 157]."""
-        # [cite_start]Condition (14): Check computation sums at every node [cite: 158]
+        # Condition (14): Check computation sums at every node [cite: 158]
         for i in range(self.M):
             comp_sum = sum(task.tau[i] * task.get_R_k(t) for task in self.tasks if task.is_active_at_node(i))
             if comp_sum > 1.0:
                 return False
 
-        # [cite_start]Condition (15): Check communication sums at every link [cite: 159]
+        # Condition (15): Check communication sums at every link [cite: 159]
         for i in range(self.M - 1):
             comm_sum = sum(
                 (task.a[i] * task.eta_min[i] * task.get_R_k(t)) / c_t[i]
@@ -77,19 +78,38 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
             R_k = task.get_R_k(t)
             for i in range(task.b_k, task.e_k):
                 beta = c_t[i] / (R_k * task.a[i]) # Derivative term [cite: 208]
-                s_min = (task.a[i] * task.eta_min[i] * R_k) / c_t[i] # Minimum bandwidth [cite: 205]
+                
+                # Minimum QoS Constraint (Lower Bound) [cite: 205]
+                s_min = (task.a[i] * task.eta_min[i] * R_k) / c_t[i] 
+                
+                # Maximum Compression Constraint (New Upper Bound)
+                # s <= R_k * a_i / c_i (which is exactly 1.0 / beta). 
+                # We also cap it at 1.0 since a share of a link cannot exceed 100%.
+                s_max = min(1.0, 1.0 / beta) 
+                
                 context.append({
                     'task': task,
                     'link_i': i,
                     'beta': beta,
-                    's_min': s_min
+                    's_min': s_min,
+                    's_max': s_max
                 })
         return context
 
     def _calculate_eta_and_derivative(self, s_val: float, beta: float) -> Tuple[float, float]:
-        """Evaluates the compression factor and its piecewise derivative[cite: 208, 209]."""
+        """
+        Evaluates the compression factor and its derivative.
+        Due to the new upper bounds, the piecewise logic is removed. The relationship 
+        is strictly linear within the solver's feasible region.
+        """
+        # A tiny min() wrapper is kept purely to prevent float precision rounding 
+        # from handing an eta like 1.0000000001 to your black-box callable.
         eta_val = min(1.0, beta * s_val)
-        d_eta_ds = 0.0 if np.isclose(eta_val, 1.0) else beta
+        
+        # The derivative is now constantly beta! The solver's boundary constraints
+        # naturally handle the stopping condition instead of a 0.0 gradient.
+        d_eta_ds = beta 
+        
         return eta_val, d_eta_ds
 
     def _evaluate_objective(self, s_flat: np.ndarray, context: List[Dict[str, Any]]) -> Tuple[float, np.ndarray]:
@@ -97,9 +117,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         total_obj = 0.0
         grad_flat = np.zeros_like(s_flat)
 
-        # 1. Group the flat array back into vectors per task
         for task in self.tasks:
-            # Find indices in the flat array that belong to this task
             task_indices = [idx for idx, ctx in enumerate(context) if ctx['task'] == task]
             
             if not task_indices:
@@ -108,7 +126,6 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
             eta_vec = []
             d_eta_ds_vec = []
 
-            # 2. Calculate eta and inner derivatives for this task
             for idx in task_indices:
                 s_val = s_flat[idx]
                 beta = context[idx]['beta']
@@ -119,29 +136,24 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
 
             eta_array = np.array(eta_vec)
 
-            # 3. Call the black box
             acc = task.A_k(eta_array)
             grad_acc = task.grad_A_k(eta_array)
 
             total_obj += task.w_k * acc
 
-            # 4. Apply the chain rule and map back to the flat gradient array
             for local_idx, flat_idx in enumerate(task_indices):
                 chain_rule_grad = task.w_k * grad_acc[local_idx] * d_eta_ds_vec[local_idx]
                 grad_flat[flat_idx] = chain_rule_grad
 
-        # SciPy minimizes, so return negative values to maximize
         return -total_obj, -grad_flat
 
     def _build_constraints(self, context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Generates the linear capacity constraints for each link: sum(s) <= 1[cite: 138]."""
         constraints = []
         for link_i in range(self.M - 1):
-            # Find all flat indices that operate on this specific link
             indices_on_link = [idx for idx, ctx in enumerate(context) if ctx['link_i'] == link_i]
             
             if indices_on_link:
-                # 1.0 - sum(s) >= 0 ensures sum(s) <= 1
                 constraints.append({
                     'type': 'ineq',
                     'fun': lambda s_flat, idxs=indices_on_link: 1.0 - sum(s_flat[i] for i in idxs)
@@ -183,21 +195,18 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
     # ==========================================
 
     def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
-            """Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
+        """Reduces to a convex optimization problem over s^{comm}(t) (Theorem 3.4)[cite: 179]."""
         if not self.check_feasibility(t, c_t):
             return None
 
-        # 1. Map physical layout to 1D solver space
         context = self._build_context(t, c_t)
         
-        # 2. Setup bounds and initial guess (start at s_min)
-        bounds = [(ctx['s_min'], 1.0) for ctx in context]
+        # UPDATED: Setup bounds using the newly formulated s_max
+        bounds = [(ctx['s_min'], ctx['s_max']) for ctx in context]
         x0 = np.array([ctx['s_min'] for ctx in context])
 
-        # 3. Setup link capacity constraints
         constraints = self._build_constraints(context)
 
-        # 4. Execute SLSQP solver
         result = minimize(
             fun=self._evaluate_objective,
             x0=x0,
@@ -208,5 +217,4 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
             constraints=constraints
         )
 
-        # 5. Map 1D solver output back to physical layout
         return self._pack_results(t, c_t, result.x, context)
