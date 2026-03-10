@@ -284,13 +284,18 @@ def demo_no_csi_multi_task(api):
     for tid in [1, 2]:
         print(f"    Task {tid}: eta = {res[tid]['eta']}, s_comm = {res[tid]['s_comm']}")
 
-    # Asymmetric: Task 1 congested, Task 2 healthy
-    optimizer.lambda_k[1] = 50.0
-    optimizer.lambda_k[2] = 0.1
-    res = optimizer.optimize(t=1, c_hat=c_hat)
-    print(f"  [Asymmetric: Task1 congested]")
+    # Dual update: simulate actual delays (Task 1 violated, Task 2 under target)
+    # Target delay = 1/R = 0.1s. lambda_k grows if D_act > 0.1, shrinks if D_act < 0.1
+    optimizer.update_dual(t=0, actual_delays={1: 0.5, 2: 0.05})
+    print(f"  After update_dual(t=0, {{1: 0.5, 2: 0.05}}):")
     for tid in [1, 2]:
-        print(f"    Task {tid} (lambda={optimizer.lambda_k[tid]}): eta = {res[tid]['eta']}")
+        print(f"    Task {tid}: lambda_k = {optimizer.lambda_k[tid]:.2f}")
+
+    # Asymmetric: Task 1 congested (high lambda), Task 2 healthy (low lambda)
+    res = optimizer.optimize(t=1, c_hat=c_hat)
+    print(f"  [After dual update: Task1 congested, Task2 healthy]")
+    for tid in [1, 2]:
+        print(f"    Task {tid} (lambda={optimizer.lambda_k[tid]:.2f}): eta = {res[tid]['eta']}")
 
 
 # ---------------------------------------------------------------------------
