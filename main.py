@@ -102,18 +102,46 @@ def setup_model_and_callables():
 def make_task(task_id: int, api: InferenceTaskCallables, w_k: float = 1.0) -> InferenceTask:
     """
     Builds an InferenceTask from InferenceTaskCallables.
-    Uses 3-node chain (L_k=3): nodes 0,1,2 and links 0,1.
-    tau, a, eta_min must satisfy optimizer feasibility; values chosen to be feasible.
+
+    Topology: 3-node chain (L_k=3) — nodes 0, 1, 2 connected by links 0, 1.
+    The eta vector has one entry per link (compression ratio for that link).
+
+    Parameters
+    ----------
+    task_id : int
+        Unique identifier for this task. Used as key in optimizer output dict.
+    api : InferenceTaskCallables
+        Provides accuracy_callable(eta_np) -> float and gradient_callable(eta_np) -> np.ndarray.
+    w_k : float
+        Weight in the multi-task objective. Higher w_k = higher priority for accuracy.
+
+    Task Parameters (must match the optimizer's feasibility conditions)
+    ----------------------------------------------------------------
+    b_k : int
+        First node index of this task's path. b_k=0 means the task starts at node 0.
+    L_k : int
+        Number of nodes in the chain. L_k=3 -> nodes 0,1,2 and links 0,1.
+    tau : dict[int, float]
+        Compute time (seconds) per node. tau[i] = time to run computation at node i.
+        Small values (e.g. 0.01) keep the problem feasible.
+    a : dict[int, float]
+        Size (bytes or bits) per link. a[i] = data size sent over link i.
+        Used in delay constraint: delay on link i >= (a[i] * eta[i]) / c_i.
+    eta_min : dict[int, float]
+        Minimum compression ratio per link. eta[i] in [eta_min[i], 1.0].
+        Lower eta = more compression = less bandwidth but lower accuracy.
+    R_k_callable : callable t -> float
+        Target throughput R_k(t) packets/s. Max allowed delay = 1/R_k(t).
     """
     return InferenceTask(
         task_id=task_id,
-        b_k=0,
-        L_k=3,
-        tau={0: 0.01, 1: 0.01, 2: 0.01},
-        a={0: 10.0, 1: 10.0},
-        eta_min={0: 0.1, 1: 0.1},
-        R_k_callable=lambda t: 10.0,
-        w_k=w_k,
+        b_k=0,       # task starts at node 0
+        L_k=3,       # 3 nodes (0,1,2) -> 2 links (0,1)
+        tau={0: 0.01, 1: 0.01, 2: 0.01},   # compute time per node (small = feasible)
+        a={0: 10.0, 1: 10.0},              # data size per link
+        eta_min={0: 0.1, 1: 0.1},          # min compression ratio per link (eta in [0.1, 1])
+        R_k_callable=lambda t: 10.0,       # target throughput 10 -> max delay 0.1s
+        w_k=w_k,                            # weight in multi-task objective
         accuracy_callable=api.accuracy_callable,
         gradient_callable=api.gradient_callable,
     )
