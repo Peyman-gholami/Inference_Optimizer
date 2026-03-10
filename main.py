@@ -1,5 +1,5 @@
 """
-Demo: All Four Optimizer Types with InferenceTaskCallables
+# Demo: All Four Optimizer Types with InferenceTaskCallables
 
 This script demonstrates the four optimizer configurations:
   1. CSI-Aware Single Task   - Perfect channel state (c_t), one task, closed-form optimal

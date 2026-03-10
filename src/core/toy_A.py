@@ -11,7 +11,7 @@ A(theta, eta) = acc(theta) * prod_i (1 - alpha_i * (1 - eta_i)^2)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
