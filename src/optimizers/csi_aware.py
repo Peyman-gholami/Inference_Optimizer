@@ -40,7 +40,9 @@ class CSIAwareSingleTaskOptimizer(BaseOptimizer):
         s_comp = np.ones(task.L_k)
         s_comm = np.ones(task.L_k - 1)
 
-        return {task.task_id: {'eta': eta, 's_comp': s_comp, 's_comm': s_comm}}
+        return self.scale_allocations_to_unit_sum(
+            {task.task_id: {'eta': eta, 's_comp': s_comp, 's_comm': s_comm}}
+        )
 
 
 class CSIAwareMultiTaskOptimizer(BaseOptimizer):
@@ -217,4 +219,6 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
             constraints=constraints
         )
 
-        return self._pack_results(t, c_t, result.x, context)
+        return self.scale_allocations_to_unit_sum(
+            self._pack_results(t, c_t, result.x, context)
+        )

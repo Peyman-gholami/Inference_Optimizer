@@ -78,12 +78,14 @@ class NoCSISingleTaskOptimizer(BaseOptimizer):
             bounds=bounds,
             constraints=constraints
         )
-        
-        return {task.task_id: {
-            'eta': result.x[:-1], 
-            's_comp': np.ones(task.L_k), 
-            's_comm': np.ones(len(links))
-        }}
+
+        return self.scale_allocations_to_unit_sum({
+            task.task_id: {
+                'eta': result.x[:-1],
+                's_comp': np.ones(task.L_k),
+                's_comm': np.ones(len(links))
+            }
+        })
 
     def update_dual(self, t: int, actual_delays: Dict[int, float]):
         """Dual Step: Update the multiplier [cite: 258-259]."""
@@ -230,7 +232,7 @@ class NoCSIMultiTaskOptimizer(BaseOptimizer):
                 's_comp': current_s[task.task_id]['s_comp'],
                 's_comm': current_s[task.task_id]['s_comm']
             }
-        return final_allocations
+        return self.scale_allocations_to_unit_sum(final_allocations)
 
     def update_dual(self, t: int, actual_delays: Dict[int, float]):
         """Dual Step: Update queues for active tasks [cite: 346-349]."""

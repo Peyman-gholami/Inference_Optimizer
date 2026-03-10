@@ -1,5 +1,5 @@
 """
-# Demo: All Four Optimizer Types with InferenceTaskCallables
+Demo: All Four Optimizer Types with InferenceTaskCallables
 
 This script demonstrates the four optimizer configurations:
   1. CSI-Aware Single Task   - Perfect channel state (c_t), one task, closed-form optimal
@@ -166,7 +166,7 @@ def demo_csi_aware_single_task(api):
     optimizer = CSIAwareSingleTaskOptimizer(M=3, tasks=[task])
 
     # Feasible: high capacity -> optimizer can allocate up to 1.0
-    c_t = np.array([100.0, 100.0])
+    c_t = np.array([30.0, 100.0])
     res = optimizer.optimize(t=0, c_t=c_t)
 
     if res is None:
@@ -212,8 +212,9 @@ def demo_csi_aware_multi_task(api):
     for tid in [1, 2]:
         eta = res[tid]["eta"]
         s_comm = res[tid]["s_comm"]
+        s_comp = res[tid]["s_comp"]
         acc = task1.A_k(eta) if tid == 1 else task2.A_k(eta)
-        print(f"  Task {tid}: eta = {eta}, s_comm = {s_comm}, A = {acc:.4f}")
+        print(f"  Task {tid}: eta = {eta}, s_comm = {s_comm}, s_comp = {s_comp}, A = {acc:.4f}")
 
     # Verify link capacity: sum of s_comm on each link <= 1
     total_link0 = res[1]["s_comm"][0] + res[2]["s_comm"][0]
@@ -244,7 +245,8 @@ def demo_no_csi_single_task(api):
     # Empty queue -> maximize accuracy (eta -> 1)
     optimizer.lambda_t = 0.0
     res = optimizer.optimize(t=0, c_hat=c_hat)
-    print(f"  [Empty queue] lambda=0: eta = {res[1]['eta']}")
+    print(f"  [Empty queue] lambda=0:")
+    print(f"    eta = {res[1]['eta']}, s_comm = {res[1]['s_comm']}, s_comp = {res[1]['s_comp']}")
 
     # Simulate delay violation -> lambda grows
     optimizer.update_dual(t=0, actual_delays={1: 0.5})
@@ -253,7 +255,8 @@ def demo_no_csi_single_task(api):
     # Congested queue -> compress to eta_min
     optimizer.lambda_t = 11.0
     res = optimizer.optimize(t=1, c_hat=c_hat)
-    print(f"  [Congested] lambda=11: eta = {res[1]['eta']}")
+    print(f"  [Congested] lambda=11:")
+    print(f"    eta = {res[1]['eta']}, s_comm = {res[1]['s_comm']}, s_comp = {res[1]['s_comp']}")
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +285,7 @@ def demo_no_csi_multi_task(api):
     res = optimizer.optimize(t=0, c_hat=c_hat)
     print(f"  [Symmetric queues]")
     for tid in [1, 2]:
-        print(f"    Task {tid}: eta = {res[tid]['eta']}, s_comm = {res[tid]['s_comm']}")
+        print(f"    Task {tid}: eta = {res[tid]['eta']}, s_comm = {res[tid]['s_comm']}, s_comp = {res[tid]['s_comp']}")
 
     # Dual update: simulate actual delays (Task 1 violated, Task 2 under target)
     # Target delay = 1/R = 0.1s. lambda_k grows if D_act > 0.1, shrinks if D_act < 0.1
@@ -295,7 +298,8 @@ def demo_no_csi_multi_task(api):
     res = optimizer.optimize(t=1, c_hat=c_hat)
     print(f"  [After dual update: Task1 congested, Task2 healthy]")
     for tid in [1, 2]:
-        print(f"    Task {tid} (lambda={optimizer.lambda_k[tid]:.2f}): eta = {res[tid]['eta']}")
+        r = res[tid]
+        print(f"    Task {tid} (lambda={optimizer.lambda_k[tid]:.2f}): eta = {r['eta']}, s_comm = {r['s_comm']}, s_comp = {r['s_comp']}")
 
 
 # ---------------------------------------------------------------------------
