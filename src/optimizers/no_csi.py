@@ -9,10 +9,11 @@ class NoCSISingleTaskOptimizer(BaseOptimizer):
     """
     Implements Algorithm 1: Estimated Stochastic Dual Descent for a single task [cite: 244-260].
     """
-    def __init__(self, M: int, tasks: List[InferenceTask], mu: float):
+    def __init__(self, M: int, tasks: List[InferenceTask], mu: float, epsilon: float = 0.1):
         super().__init__(M, tasks)
         self.mu = mu
-        self.lambda_t = 0.0
+        self.lambda_t = epsilon
+        self.epsilon = epsilon
 
 
     def _build_bounds(self, task: InferenceTask, links: List[int], max_tau: float) -> List[Tuple[Optional[float], Optional[float]]]:
@@ -90,18 +91,19 @@ class NoCSISingleTaskOptimizer(BaseOptimizer):
         if task.task_id in actual_delays:
             D_act = actual_delays[task.task_id]
             R_t = task.get_R_k(t)
-            self.lambda_t = max(0.0, self.lambda_t + D_act - (1.0 / R_t))
+            self.lambda_t = max(self.epsilon, self.lambda_t + D_act - (1.0 / R_t))
 
 
 class NoCSIMultiTaskOptimizer(BaseOptimizer):
     """
     Implements Algorithm 2: Multi-Task Estimated Stochastic Dual Descent using BCD [cite: 326-348].
     """
-    def __init__(self, M: int, tasks: List[InferenceTask], mu: float, J: int = 5):
+    def __init__(self, M: int, tasks: List[InferenceTask], mu: float, epsilon: float = 0.1, J: int = 10):
         super().__init__(M, tasks)
         self.mu = mu
+        self.epsilon = epsilon
         self.J = J
-        self.lambda_k = {task.task_id: 0.0 for task in tasks}
+        self.lambda_k = {task.task_id: epsilon for task in tasks}
 
     # ==========================================
     # FUNCTIONAL HELPERS: PHASE A (RESOURCES)
@@ -236,4 +238,4 @@ class NoCSIMultiTaskOptimizer(BaseOptimizer):
             if task.task_id in actual_delays:
                 D_act = actual_delays[task.task_id]
                 R_t = task.get_R_k(t)
-                self.lambda_k[task.task_id] = max(0.0, self.lambda_k[task.task_id] + D_act - (1.0 / R_t))
+                self.lambda_k[task.task_id] = max(self.epsilon, self.lambda_k[task.task_id] + D_act - (1.0 / R_t))
