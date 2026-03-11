@@ -1,5 +1,6 @@
 numpy
 scipy
+# for running the test
 pytest
 # For main.py demo (InferenceTaskCallables with MNIST)
 torch
