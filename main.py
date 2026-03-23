@@ -92,7 +92,7 @@ def setup_model_and_callables():
         sigma=0.05,
         N=50,
         n_samples=512,
-        flat_theta=flat_theta,
+        flat_theta=None,   # model already has trained weights — no swap needed (saves time)
         device=device,
     )
 

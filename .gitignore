@@ -1,5 +1,6 @@
 data/*
 src/core/__pycache__/*
+<<<<<<< HEAD
 .venv/
 outputs/
 .pytest_cache/
