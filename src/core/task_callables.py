@@ -60,6 +60,9 @@ class InferenceTaskCallables:
         self.A = AccuracyFunction(cm, test_loader,
                                   n_samples=n_samples, device=self.device)
 
+        self.A_true = AccuracyFunction(cm, test_loader,
+                                  n_samples=None, device=self.device)
+
     # ── internal torch-level calls ────────────────────────────────
 
     def _acc_torch(self, eta: torch.Tensor) -> torch.Tensor:
@@ -67,6 +70,9 @@ class InferenceTaskCallables:
 
     def _grad_torch(self, eta: torch.Tensor) -> torch.Tensor:
         return grad_oracle(self._acc_torch, eta, sigma=self.sigma, N=self.N)
+
+    def _acc_true_torch(self, eta: torch.Tensor) -> torch.Tensor:
+        return self.A_true(eta, flat_theta=self.flat_theta)
 
     # ── public callables (np.ndarray interface) ───────────────────
 
@@ -85,6 +91,14 @@ class InferenceTaskCallables:
         """
         eta = torch.tensor(eta_vec, dtype=torch.float32)
         return self._grad_torch(eta).numpy()
+
+    def accuracy_callable_true(self, eta_vec: np.ndarray) -> float:
+        """
+        Callable for InferenceTask.accuracy_callable_true.
+        np.ndarray -> float
+        """
+        eta = torch.tensor(eta_vec, dtype=torch.float32)
+        return self._acc_true_torch(eta).item()
 
 
 # ─────────────────────────────────────────────

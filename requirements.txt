@@ -2,6 +2,8 @@ numpy
 scipy
 # for running the test
 pytest
+# Plotting for baseline comparisons
+matplotlib
 # For main.py demo (InferenceTaskCallables with MNIST)
 torch
 torchvision

@@ -138,11 +138,12 @@ def make_task(task_id: int, api: InferenceTaskCallables, w_k: float = 1.0) -> In
         b_k=0,       # task starts at node 0
         L_k=3,       # 3 nodes (0,1,2) -> 2 links (0,1)
         tau={0: 0.01, 1: 0.01, 2: 0.01},   # compute time per node (small = feasible)
-        a={0: 10.0, 1: 10.0},              # data size per link
-        eta_min={0: 0.1, 1: 0.1},          # min compression ratio per link (eta in [0.1, 1])
+        a={0: 10.0, 1: 20.0},              # data size per link
+        eta_min={0: 0.1, 1: 0.05},          # min compression ratio per link (eta in [0.1, 1])
         R_k_callable=lambda t: 10.0,       # target throughput 10 -> max delay 0.1s
         w_k=w_k,                            # weight in multi-task objective
         accuracy_callable=api.accuracy_callable,
+        accuracy_callable_true=api.accuracy_callable_true,
         gradient_callable=api.gradient_callable,
     )
 
@@ -174,7 +175,7 @@ def demo_csi_aware_single_task(api):
         return
 
     eta, s_comp, s_comm = res[1]["eta"], res[1]["s_comp"], res[1]["s_comm"]
-    acc = task.A_k(eta)
+    acc = task.A_k_true(eta)
     print(f"  c_t      = {c_t}")
     print(f"  eta*     = {eta}")
     print(f"  s_comp   = {s_comp}")
@@ -213,7 +214,7 @@ def demo_csi_aware_multi_task(api):
         eta = res[tid]["eta"]
         s_comm = res[tid]["s_comm"]
         s_comp = res[tid]["s_comp"]
-        acc = task1.A_k(eta) if tid == 1 else task2.A_k(eta)
+        acc = task1.A_k_true(eta) if tid == 1 else task2.A_k_true(eta)
         print(f"  Task {tid}: eta = {eta}, s_comm = {s_comm}, s_comp = {s_comp}, A = {acc:.4f}")
 
     # Verify link capacity: sum of s_comm on each link <= 1

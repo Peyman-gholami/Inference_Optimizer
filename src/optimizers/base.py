@@ -106,3 +106,92 @@ class BaseOptimizer(ABC):
                                               bottleneck delay experienced.
         """
         pass
+
+    def compute_residual_delay(
+        self,
+        t: int,
+        allocations: Dict[int, Dict[str, np.ndarray]],
+        c_t: np.ndarray,
+    ) -> Dict[int, float]:
+        """
+        Computes the per-task residual delay for a given slot t.
+
+        For each task k, this evaluates the bottleneck delay
+            D_k(t) = max(
+                { tau_{i,k} / s^{comp}_{i,k}(t) }_{i in stages},
+                { a_{i,k} * eta_{i,k}(t) / (s^{comm}_{i,k}(t) * c_i(t)) }_{i in links}
+            )
+        and returns
+            D_k(t) - 1 / R_k(t).
+
+        Args:
+            t (int): Current time slot.
+            allocations (Dict[int, Dict[str, np.ndarray]]): Optimizer output mapping
+                each task_id to its allocation dict with keys:
+                - 'eta': compression vector over links (length L_k - 1)
+                - 's_comp': compute share vector over nodes (length L_k)
+                - 's_comm': comm share vector over links (length L_k - 1)
+            c_t (np.ndarray): Vector of link capacities c_i(t) for i in [0, M-2].
+
+        Returns:
+            Dict[int, float]: Mapping from task_id to its residual delay
+            D_k(t) - 1 / R_k(t).
+        """
+        residuals: Dict[int, float] = {}
+
+        for task in self.tasks:
+            tid = task.task_id
+            R_t = task.get_R_k(t)
+
+            if tid not in allocations:
+                raise KeyError(f"Missing allocations for task_id={tid}.")
+            task_alloc = allocations[tid]
+
+            if "s_comp" not in task_alloc:
+                raise KeyError(f"Missing 's_comp' in allocations[{tid}].")
+            s_comp_vec = task_alloc["s_comp"]
+            expected_s_comp_len = task.L_k
+            if len(s_comp_vec) != expected_s_comp_len:
+                raise ValueError(
+                    f"allocations[{tid}]['s_comp'] has length {len(s_comp_vec)}, expected {expected_s_comp_len}."
+                )
+
+            # Computation delays across the assigned nodes: tau_{i,k} / s^{comp}_{i,k}(t).
+            comp_delays = []
+            for local_idx, node_i in enumerate(range(task.b_k, task.e_k + 1)):
+                comp_share = float(s_comp_vec[local_idx])
+                if comp_share <= 0:
+                    raise ValueError(f"s_comp must be > 0, got {comp_share} for task_id={tid}.")
+                comp_delays.append(task.tau[node_i] / comp_share)
+
+            # Communication delays using provided eta_t and instantaneous capacities.
+            comm_delays = []
+            if task.L_k > 1:
+                if "eta" not in task_alloc:
+                    raise KeyError(f"Missing 'eta' in allocations[{tid}].")
+                eta_vec = task_alloc["eta"]
+                expected_len = task.L_k - 1
+                if len(eta_vec) != expected_len:
+                    raise ValueError(
+                        f"allocations[{tid}]['eta'] has length {len(eta_vec)}, expected {expected_len}."
+                    )
+
+                if "s_comm" not in task_alloc:
+                    raise KeyError(f"Missing 's_comm' in allocations[{tid}].")
+                s_comm_vec = task_alloc["s_comm"]
+                if len(s_comm_vec) != expected_len:
+                    raise ValueError(
+                        f"allocations[{tid}]['s_comm'] has length {len(s_comm_vec)}, expected {expected_len}."
+                    )
+
+                for local_idx, link_i in enumerate(range(task.b_k, task.e_k)):
+                    comm_share = float(s_comm_vec[local_idx])
+                    if comm_share <= 0:
+                        raise ValueError(f"s_comm must be > 0, got {comm_share} for task_id={tid}.")
+                    comm_delay = (task.a[link_i] * eta_vec[local_idx]) / (comm_share * c_t[link_i])
+                    comm_delays.append(comm_delay)
+
+            D_k = max(comp_delays + comm_delays)
+            residuals[tid] = D_k - 1.0 / R_t
+
+        return residuals

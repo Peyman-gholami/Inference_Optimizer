@@ -16,6 +16,7 @@ class InferenceTask:
         R_k_callable: Callable[[int], float],  
         w_k: float,
         accuracy_callable: Callable[[np.ndarray], float],
+        accuracy_callable_true: Callable[[np.ndarray], float],
         gradient_callable: Callable[[np.ndarray], np.ndarray] # NEW: Dedicated gradient callable
     ):
         # Topology Assignments
@@ -36,7 +37,8 @@ class InferenceTask:
         # Black-Box Callables
         self._accuracy_callable = accuracy_callable
         self._gradient_callable = gradient_callable
-
+        self._accuracy_callable_true = accuracy_callable_true
+        
     def get_R_k(self, t: int) -> float:
         """
         Retrieves the target throughput R_k(t) for a specific time slot t.
@@ -54,6 +56,12 @@ class InferenceTask:
         Evaluates and returns ONLY the gradient vector with respect to \eta.
         """
         return self._gradient_callable(eta_vec)
+    
+    def A_k_true(self, eta_vec: np.ndarray) -> float:
+        """
+        Evaluates and returns ONLY the scalar accuracy value.
+        """
+        return self._accuracy_callable_true(eta_vec)
         
     def is_active_at_node(self, i: int) -> bool:
         """
