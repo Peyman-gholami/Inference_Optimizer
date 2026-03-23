@@ -73,7 +73,7 @@ from main import setup_model_and_callables, make_task  # noqa: E402
 
 def _compute_accuracy(task: InferenceTask, allocations: Dict[int, Dict[str, np.ndarray]]) -> float:
     eta = allocations[task.task_id]["eta"]
-    return float(task.A_k(eta))
+    return float(task.A_k_true(eta))
 
 
 def _compute_delay_and_ratio(
