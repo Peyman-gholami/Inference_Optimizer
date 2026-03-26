@@ -271,6 +271,75 @@ class MovingAverageSingleTaskBaseline(EstimatedCSICompressionSingleTaskBaseline)
 # =============================================================================
 
 
+class MaxCompressionMultiTaskBaseline(BaseOptimizer):
+    """
+    CSI-Aware Multi-Task: maximum compression with static equal resource shares.
+
+    Uses the same per-node / per-link equal split of s_comp and s_comm as
+    `StaticEqualShareMultiTaskBaseline`, but fixes compression on every hop to
+    the minimum allowable value: eta_i,k = eta_{i,k}^{min}.
+
+    Does not perform feasibility checks; residual delay is evaluated via
+    `BaseOptimizer.compute_residual_delay`.
+    """
+
+    def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
+        allocations: Dict[int, Dict[str, np.ndarray]] = {}
+
+        tasks_on_node = {i: _active_tasks_on_node(self.tasks, i) for i in range(self.M)}
+        tasks_on_link = {i: _active_tasks_on_link(self.tasks, i) for i in range(self.M - 1)}
+
+        for task in self.tasks:
+            s_comp = np.zeros(task.L_k, dtype=float)
+            for local_idx, node_i in enumerate(range(task.b_k, task.e_k + 1)):
+                n = len(tasks_on_node[node_i])
+                s_comp[local_idx] = 1.0 / n if n > 0 else 0.0
+
+            s_comm = np.zeros(task.L_k - 1, dtype=float)
+            eta = np.zeros(task.L_k - 1, dtype=float)
+            for local_idx, link_i in enumerate(range(task.b_k, task.e_k)):
+                n = len(tasks_on_link[link_i])
+                s_comm_val = 1.0 / n if n > 0 else 0.0
+                s_comm[local_idx] = s_comm_val
+                eta[local_idx] = float(task.eta_min[link_i])
+
+            allocations[task.task_id] = {"eta": eta, "s_comp": s_comp, "s_comm": s_comm}
+
+        return self.scale_allocations_to_unit_sum(allocations)
+
+
+class NoCompressionMultiTaskBaseline(BaseOptimizer):
+    """
+    CSI-Aware Multi-Task: no compression with static equal resource shares.
+
+    Same s_comp / s_comm splitting as `StaticEqualShareMultiTaskBaseline`, but
+    fixes eta_i,k = 1 on every hop (uncompressed transmission).
+    """
+
+    def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
+        allocations: Dict[int, Dict[str, np.ndarray]] = {}
+
+        tasks_on_node = {i: _active_tasks_on_node(self.tasks, i) for i in range(self.M)}
+        tasks_on_link = {i: _active_tasks_on_link(self.tasks, i) for i in range(self.M - 1)}
+
+        for task in self.tasks:
+            s_comp = np.zeros(task.L_k, dtype=float)
+            for local_idx, node_i in enumerate(range(task.b_k, task.e_k + 1)):
+                n = len(tasks_on_node[node_i])
+                s_comp[local_idx] = 1.0 / n if n > 0 else 0.0
+
+            s_comm = np.zeros(task.L_k - 1, dtype=float)
+            eta = np.ones(task.L_k - 1, dtype=float)
+            for local_idx, link_i in enumerate(range(task.b_k, task.e_k)):
+                n = len(tasks_on_link[link_i])
+                s_comm_val = 1.0 / n if n > 0 else 0.0
+                s_comm[local_idx] = s_comm_val
+
+            allocations[task.task_id] = {"eta": eta, "s_comp": s_comp, "s_comm": s_comm}
+
+        return self.scale_allocations_to_unit_sum(allocations)
+
+
 class StaticEqualShareMultiTaskBaseline(BaseOptimizer):
     """
     CSI-Aware Multi-Task Baseline 1: Static Equal-Share Allocation.

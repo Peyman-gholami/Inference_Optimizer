@@ -8,6 +8,7 @@ Runs a simulation for T time slots with i.i.d. uniform channel capacities and co
 Algorithms included:
   - CSI-aware multi-task optimizer (convex solver, perfect c_t)
   - CSI-aware multi-task baselines:
+      0) MaxCompressionMultiTaskBaseline, NoCompressionMultiTaskBaseline
       1) StaticEqualShareMultiTaskBaseline
       2) ProportionalResourceAllocationMultiTaskBaseline
       3) StrictPriorityGreedyMultiTaskBaseline
@@ -19,10 +20,13 @@ Algorithms included:
 
 Usage:
   python compare_to_baselines_multi.py --T 200 --seed 0 --K 2
+  python compare_to_baselines_multi.py --baseline_algorithms equal_share,strict_priority
+  python compare_to_baselines_multi.py --baseline_algorithms none
 """
 
 import argparse
 import os
+import json
 from typing import Dict, List, Tuple
 
 import sys
@@ -41,6 +45,8 @@ from src.optimizers.csi_aware import CSIAwareMultiTaskOptimizer
 from src.optimizers.no_csi import NoCSIMultiTaskOptimizer
 from src.optimizers.estimators import MeanEstimator, MeanMinusZStdLCB
 from src.optimizers.baseline import (
+    MaxCompressionMultiTaskBaseline,
+    NoCompressionMultiTaskBaseline,
     StaticEqualShareMultiTaskBaseline,
     ProportionalResourceAllocationMultiTaskBaseline,
     StrictPriorityGreedyMultiTaskBaseline,
@@ -94,6 +100,7 @@ def run_compare(
     out_dir: str,
     mu: float,
     epsilon: float,
+    baseline_algorithms: List[str],
 ) -> Tuple[str, str, str]:
     rng = np.random.default_rng(seed)
 
@@ -106,7 +113,7 @@ def run_compare(
     # Tasks (all share the same path in current demo)
     tasks: List[InferenceTask] = []
     for k in range(K):
-        tasks.append(make_task(task_id=k + 1, api=api, w_k=(k+1)*10))
+        tasks.append(make_task(task_id=k + 1, api=api, w_k=(k+1)))
 
     # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
     # This helps separate equal-share vs proportional vs priority baselines.
@@ -122,38 +129,95 @@ def run_compare(
 
     algos: List[Tuple[str, BaseOptimizer]] = [
         ("CSI-aware (optimal)", csi_opt),
-        ("Baseline: equal-share", StaticEqualShareMultiTaskBaseline(M=M, tasks=tasks)),
-        ("Baseline: proportional", ProportionalResourceAllocationMultiTaskBaseline(M=M, tasks=tasks)),
-        ("Baseline: strict priority", StrictPriorityGreedyMultiTaskBaseline(M=M, tasks=tasks)),
         ("No-CSI (Alg2) + LCB", no_csi_opt),
-        ("No-CSI baseline: decoupled equal-split", DecoupledEqualSplitStochasticDescentMultiTaskBaseline(M=M, tasks=tasks, mu=mu, epsilon=epsilon)),
-        ("No-CSI baseline: queue-proportional", QueueProportionalHeuristicMultiTaskBaseline(M=M, tasks=tasks, mu=mu, epsilon=epsilon)),
-        # ("No-CSI baseline: certainty equivalence", HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(M=M, tasks=tasks)),
     ]
+    baseline_catalog = {
+        "max_compression": (
+            "Baseline: max compression",
+            MaxCompressionMultiTaskBaseline(M=M, tasks=tasks),
+        ),
+        "no_compression": (
+            "Baseline: no compression",
+            NoCompressionMultiTaskBaseline(M=M, tasks=tasks),
+        ),
+        "equal_share": (
+            "Baseline: equal-share",
+            StaticEqualShareMultiTaskBaseline(M=M, tasks=tasks),
+        ),
+        "proportional": (
+            "Baseline: proportional",
+            ProportionalResourceAllocationMultiTaskBaseline(M=M, tasks=tasks),
+        ),
+        "strict_priority": (
+            "Baseline: strict priority",
+            StrictPriorityGreedyMultiTaskBaseline(M=M, tasks=tasks),
+        ),
+        "decoupled_equal_split": (
+            "No-CSI Baseline: decoupled equal-split",
+            DecoupledEqualSplitStochasticDescentMultiTaskBaseline(
+                M=M, tasks=tasks, mu=mu, epsilon=epsilon
+            ),
+        ),
+        "queue_proportional": (
+            "No-CSI Baseline: queue-proportional",
+            QueueProportionalHeuristicMultiTaskBaseline(
+                M=M, tasks=tasks, mu=mu, epsilon=epsilon
+            ),
+        ),
+        "certainty_equivalence": (
+            "No-CSI Baseline: moving average",
+            HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(M=M, tasks=tasks),
+        ),
+    }
+    for baseline_name in baseline_algorithms:
+        algo_entry = baseline_catalog.get(baseline_name)
+        if algo_entry is None:
+            valid = ", ".join(sorted(baseline_catalog.keys()))
+            raise ValueError(
+                f"Unknown baseline algorithm '{baseline_name}'. "
+                f"Valid options: {valid}."
+            )
+        algos.append(algo_entry)
 
     # Channel estimators
-    lcb = MeanMinusZStdLCB(num_links=num_links, warmup_value=c_max, z=1.2815515655446004, warmup=5)
-    hist_mean = MeanEstimator(num_links=num_links, warmup_value=c_min, warmup=5)
+    lcb = MeanMinusZStdLCB(num_links=num_links, warmup_value=c_min, z=1.2815515655446004, warmup=5)
+    hist_mean = (
+        MeanEstimator(num_links=num_links, warmup_value=c_min, warmup=5)
+        if "certainty_equivalence" in set(baseline_algorithms)
+        else None
+    )
 
     times = np.arange(T)
     acc_hist: Dict[str, np.ndarray] = {name: np.full(T, np.nan, dtype=float) for name, _ in algos}
     delay_ratio_hist: Dict[str, np.ndarray] = {
         name: np.full(T, np.nan, dtype=float) for name, _ in algos
     }
+    c_t_hist = np.full((T, num_links), np.nan, dtype=float)
+
+    # Per-task compression history, for later plotting/debugging.
+    # Shape: (A, T, K, L) where L = L_k - 1 (links per task path).
+    algo_names = [name for name, _ in algos]
+    algo_index = {name: i for i, name in enumerate(algo_names)}
+    L = int(tasks[0].L_k - 1)
+    eta_hist_stack = np.full((len(algo_names), T, K, L), np.nan, dtype=float)
+    task_ids = [int(t.task_id) for t in tasks]
 
     for t in range(T):
         print(f"Time slot: {t}")
         c_t = rng.uniform(low=c_min, high=c_max, size=num_links).astype(float)
+        c_t_hist[t, :] = c_t
 
         for name, opt in algos:
             if name in {
                 "No-CSI (Alg2) + LCB",
-                "No-CSI baseline: decoupled equal-split",
-                "No-CSI baseline: queue-proportional",
+                "No-CSI Baseline: decoupled equal-split",
+                "No-CSI Baseline: queue-proportional",
             }:
                 c_hat = lcb.estimate(t)
                 allocations = opt.optimize(t=t, c_hat=c_hat)
-            elif name == "No-CSI baseline: certainty equivalence":
+            elif name == "No-CSI Baseline: moving average":
+                if hist_mean is None:
+                    raise RuntimeError("Historical-mean estimator is not initialized.")
                 c_hat = hist_mean.estimate(t)
                 allocations = opt.optimize(t=t, c_hat=c_hat)
             else:
@@ -165,11 +229,20 @@ def run_compare(
             acc_hist[name][t] = _weighted_accuracy(tasks, allocations)
             delay_ratio_hist[name][t] = _avg_delay_over_invR(opt, tasks, t, allocations, c_t)
 
+            # Store per-task eta values if present.
+            algo_idx = algo_index[name]
+            for k_idx, task in enumerate(tasks):
+                eta = np.array(allocations[task.task_id]["eta"], dtype=float)
+                if eta.size != L:
+                    # Be robust if something changes in task path length.
+                    eta = eta.reshape(-1)
+                eta_hist_stack[algo_idx, t, k_idx, : min(L, eta.size)] = eta[: min(L, eta.size)]
+
             # Dual updates for algorithms that track queues
             if name in {
                 "No-CSI (Alg2) + LCB",
-                "No-CSI baseline: decoupled equal-split",
-                "No-CSI baseline: queue-proportional",
+                "No-CSI Baseline: decoupled equal-split",
+                "No-CSI Baseline: queue-proportional",
             }:
                 # compute realized per-task delays under true c_t
                 residuals = opt.compute_residual_delay(t, allocations, c_t)
@@ -181,7 +254,8 @@ def run_compare(
 
         # Estimators observe c_t after actions
         lcb.update(c_t)
-        hist_mean.update(c_t)
+        if hist_mean is not None:
+            hist_mean.update(c_t)
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -192,6 +266,60 @@ def run_compare(
         )
         for name, _ in algos
     }
+
+    # ----------------------------
+    # Save all simulation results for later plotting
+    # ----------------------------
+    acc_hist_stack = np.stack([acc_hist[name] for name in algo_names], axis=0)  # (A, T)
+    delay_ratio_hist_stack = np.stack(
+        [delay_ratio_hist[name] for name in algo_names], axis=0
+    )  # (A, T)
+    acc_avg_stack = np.stack([acc_avg[name] for name in algo_names], axis=0)  # (A, T)
+    delay_ratio_avg_stack = np.stack(
+        [delay_ratio_avg[name] for name in algo_names], axis=0
+    )  # (A, T)
+
+    tradeoff_x = np.array([float(acc_avg[name][-1]) for name in algo_names], dtype=float)
+    tradeoff_y = np.array(
+        [float(delay_ratio_avg[name][-1]) for name in algo_names], dtype=float
+    )
+
+    data_path = os.path.join(out_dir, "simulation_results_multi.npz")
+    np.savez_compressed(
+        data_path,
+        times=times,
+        c_t_hist=c_t_hist,
+        algo_names=np.array(algo_names, dtype=str),
+        task_ids=np.array(task_ids, dtype=int),
+        acc_hist=acc_hist_stack,
+        delay_ratio_hist=delay_ratio_hist_stack,
+        eta_hist=eta_hist_stack,
+        acc_avg=acc_avg_stack,
+        delay_ratio_avg=delay_ratio_avg_stack,
+        tradeoff_x=tradeoff_x,
+        tradeoff_y=tradeoff_y,
+        K=np.array([int(K)], dtype=int),
+        task_L_k=np.array([int(tasks[0].L_k)], dtype=int),
+    )
+
+    metadata_path = os.path.join(out_dir, "simulation_metadata_multi.json")
+    metadata = {
+        "T": int(T),
+        "seed": int(seed),
+        "K": int(K),
+        "c_min": float(c_min),
+        "c_max": float(c_max),
+        "num_links": int(num_links),
+        "M": int(M),
+        "mu": float(mu),
+        "epsilon": float(epsilon),
+        "baseline_algorithms_used": list(baseline_algorithms),
+        "algo_names": algo_names,
+        "task_ids": task_ids,
+        "L_k": int(tasks[0].L_k),
+    }
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
 
     # Markers (distinct per algorithm) to make plots readable.
     markers = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "H"]
@@ -269,15 +397,35 @@ def run_compare(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--T", type=int, default=100)
+    p.add_argument("--T", type=int, default=150)
     p.add_argument("--seed", type=int, default=567)
     p.add_argument("--K", type=int, default=2)
     p.add_argument("--c_min", type=float, default=40.0)
     p.add_argument("--c_max", type=float, default=150.0)
     p.add_argument("--mu", type=float, default=10.0)
     p.add_argument("--epsilon", type=float, default=0.1)
+    p.add_argument(
+        "--baseline_algorithms",
+        type=str,
+        default="max_compression,no_compression,equal_share,proportional,strict_priority,decoupled_equal_split,queue_proportional,certainty_equivalence",
+        help=(
+            "Comma-separated baseline algorithms to include. "
+            "Use 'none' to disable all baselines. "
+            "Options: max_compression, no_compression, equal_share, proportional, "
+            "strict_priority, decoupled_equal_split, queue_proportional, certainty_equivalence."
+        ),
+    )
     p.add_argument("--out_dir", type=str, default="outputs/baseline_compare_multi")
     args = p.parse_args()
+    baseline_arg = args.baseline_algorithms.strip().lower()
+    if baseline_arg == "none":
+        baseline_algorithms: List[str] = []
+    else:
+        baseline_algorithms = [
+            part.strip()
+            for part in args.baseline_algorithms.split(",")
+            if part.strip()
+        ]
 
     acc_path, res_path, tradeoff_path = run_compare(
         T=args.T,
@@ -288,11 +436,18 @@ def main() -> None:
         out_dir=args.out_dir,
         mu=args.mu,
         epsilon=args.epsilon,
+        baseline_algorithms=baseline_algorithms,
     )
 
     print(f"Saved accuracy plot to: {acc_path}")
     print(f"Saved delay/(1/R) plot to: {res_path}")
     print(f"Saved trade-off plot to: {tradeoff_path}")
+    print(
+        f"Saved raw simulation data to: {os.path.join(args.out_dir, 'simulation_results_multi.npz')}"
+    )
+    print(
+        f"Saved simulation metadata to: {os.path.join(args.out_dir, 'simulation_metadata_multi.json')}"
+    )
 
 
 if __name__ == "__main__":

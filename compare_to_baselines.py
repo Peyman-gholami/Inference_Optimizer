@@ -25,6 +25,7 @@ Usage:
 
 import argparse
 import os
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -113,6 +114,21 @@ def run_compare(
     # Algorithms
     algos: List[Tuple[str, BaseOptimizer]] = [("CSI-aware (optimal)", CSIAwareSingleTaskOptimizer(M=M, tasks=[task]))]
 
+    # No-CSI with LCB estimator (fed as c_hat)
+    lcb = MeanMinusZStdLCB(
+        num_links=num_links,
+        warmup_value=c_min,
+        z=1.2815515655446004,
+        warmup=5,
+    )
+    no_csi = NoCSISingleTaskOptimizer(
+        M=M,
+        tasks=[task],
+        mu=no_csi_mu,
+        epsilon=no_csi_epsilon,
+    )
+    algos.append(("No-CSI (Alg1) + LCB(90%)", no_csi))
+    
     baseline_catalog = {
         "max_compression": (
             "Baseline: max compression",
@@ -127,15 +143,15 @@ def run_compare(
             UniformCompressionSingleTaskBaseline(M=M, tasks=[task]),
         ),
         "myopic": (
-            "Baseline: myopic",
+            "No-CSI Baseline: myopic",
             MyopicSingleTaskBaseline(M=M, tasks=[task]),
         ),
         "conservative": (
-            "Baseline: conservative",
+            "No-CSI Baseline: conservative",
             ConservativeSingleTaskBaseline(M=M, tasks=[task]),
         ),
         "moving_average": (
-            "Baseline: moving average",
+            "No-CSI Baseline: moving average",
             MovingAverageSingleTaskBaseline(M=M, tasks=[task]),
         ),
     }
@@ -152,20 +168,7 @@ def run_compare(
             )
         algos.append(algo_entry)
 
-    # No-CSI with LCB estimator (fed as c_hat)
-    lcb = MeanMinusZStdLCB(
-        num_links=num_links,
-        warmup_value=c_min,
-        z=1.2815515655446004,
-        warmup=1,
-    )
-    no_csi = NoCSISingleTaskOptimizer(
-        M=M,
-        tasks=[task],
-        mu=no_csi_mu,
-        epsilon=no_csi_epsilon,
-    )
-    algos.append(("No-CSI (Alg1) + LCB(90%)", no_csi))
+    
 
     # Online estimators for selected estimated-CSI baselines only.
     # (Baselines themselves consume `c_hat`; estimators are updated after observing `c_t`.)
@@ -197,27 +200,29 @@ def run_compare(
     }
 
     # Run
+    c_t_hist = np.full((T, num_links), np.nan, dtype=float)
     for t in range(T):
         print(f"Time slot: {t}")
         # Realized channel capacities
         c_t = rng.uniform(low=c_min, high=c_max, size=num_links).astype(float)
+        c_t_hist[t, :] = c_t
         print(f"c_t: {c_t}")
 
         for name, opt in algos:
             if name == "No-CSI (Alg1) + LCB(90%)":
                 c_hat = lcb.estimate(t)
                 allocations = opt.optimize(t=t, c_hat=c_hat)
-            elif name == "Baseline: myopic":
+            elif name == "No-CSI Baseline: myopic":
                 if myopic_est is None:
                     raise RuntimeError("Myopic estimator is not initialized.")
                 c_hat = myopic_est.estimate(t)
                 allocations = opt.optimize(t=t, c_hat=c_hat)
-            elif name == "Baseline: conservative":
+            elif name == "No-CSI Baseline: conservative":
                 if cons_est is None:
                     raise RuntimeError("Conservative estimator is not initialized.")
                 c_hat = cons_est.estimate(t)
                 allocations = opt.optimize(t=t, c_hat=c_hat)
-            elif name == "Baseline: moving average":
+            elif name == "No-CSI Baseline: moving average":
                 if ma_est is None:
                     raise RuntimeError("Moving-average estimator is not initialized.")
                 c_hat = ma_est.estimate(t)
@@ -263,6 +268,66 @@ def run_compare(
         eta_avg[name] = np.array(
             [np.nanmean(eta_hist[name][: t + 1, :], axis=0) for t in range(T)], dtype=float
         )
+
+    # ----------------------------
+    # Save all simulation results for later plotting
+    # ----------------------------
+    algo_names = [name for name, _ in algos]
+    n_algos = len(algo_names)
+    L = int(task.L_k - 1)
+
+    # Stack per-algorithm dictionaries into dense tensors for easier re-loading.
+    acc_hist_stack = np.stack([acc_hist[name] for name in algo_names], axis=0)  # (A, T)
+    delay_ratio_hist_stack = np.stack(
+        [delay_ratio_hist[name] for name in algo_names], axis=0
+    )  # (A, T)
+    eta_hist_stack = np.stack([eta_hist[name] for name in algo_names], axis=0)  # (A, T, L)
+
+    acc_avg_stack = np.stack([acc_avg[name] for name in algo_names], axis=0)  # (A, T)
+    delay_ratio_avg_stack = np.stack(
+        [delay_ratio_avg[name] for name in algo_names], axis=0
+    )  # (A, T)
+    eta_avg_stack = np.stack([eta_avg[name] for name in algo_names], axis=0)  # (A, T, L)
+
+    tradeoff_x = np.array([float(acc_avg[name][-1]) for name in algo_names], dtype=float)
+    tradeoff_y = np.array(
+        [float(delay_ratio_avg[name][-1]) for name in algo_names], dtype=float
+    )
+
+    data_path = os.path.join(out_dir, "simulation_results.npz")
+    np.savez_compressed(
+        data_path,
+        times=times,
+        c_t_hist=c_t_hist,
+        algo_names=np.array(algo_names, dtype=str),
+        acc_hist=acc_hist_stack,
+        delay_ratio_hist=delay_ratio_hist_stack,
+        eta_hist=eta_hist_stack,
+        acc_avg=acc_avg_stack,
+        delay_ratio_avg=delay_ratio_avg_stack,
+        eta_avg=eta_avg_stack,
+        tradeoff_x=tradeoff_x,
+        tradeoff_y=tradeoff_y,
+        task_L_k=np.array([int(task.L_k)], dtype=int),
+    )
+
+    metadata_path = os.path.join(out_dir, "simulation_metadata.json")
+    metadata = {
+        "T": int(T),
+        "seed": int(seed),
+        "c_min": float(c_min),
+        "c_max": float(c_max),
+        "num_links": int(num_links),
+        "M": int(M),
+        "task_id": int(task.task_id),
+        "L_k": int(task.L_k),
+        "no_csi_mu": float(no_csi_mu),
+        "no_csi_epsilon": float(no_csi_epsilon),
+        "baseline_algorithms_used": list(selected_baselines),
+        "algo_names": algo_names,
+    }
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
 
     # Markers (distinct per algorithm) to make plots readable.
     markers = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "H"]
@@ -379,7 +444,7 @@ def run_compare(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--T", type=int, default=100)
+    p.add_argument("--T", type=int, default=150)
     p.add_argument("--seed", type=int, default=12)
     p.add_argument("--c_min", type=float, default=10.0)
     p.add_argument("--c_max", type=float, default=150.0)
@@ -432,6 +497,12 @@ def main() -> None:
     print(f"Saved accuracy plot to: {acc_path}")
     print(f"Saved delay/(1/R) plot to: {res_path}")
     print(f"Saved trade-off plot to: {tradeoff_path}")
+    print(
+        f"Saved raw simulation data to: {os.path.join(args.out_dir, 'simulation_results.npz')}"
+    )
+    print(
+        f"Saved simulation metadata to: {os.path.join(args.out_dir, 'simulation_metadata.json')}"
+    )
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 """
-Demo: All Four Optimizer Types with InferenceTaskCallables
+Demo: Optimizers and Baselines with InferenceTaskCallables.
 
-This script demonstrates the four optimizer configurations:
-  1. CSI-Aware Single Task   - Perfect channel state (c_t), one task, closed-form optimal
-  2. CSI-Aware Multi-Task    - Perfect channel state (c_t), multiple tasks, convex solver
-  3. No-CSI Single Task     - Estimated channel (c_hat), one task, dual descent
-  4. No-CSI Multi-Task      - Estimated channel (c_hat), multiple tasks, BCD dual descent
+This script demonstrates:
+  1. CSI-Aware Single Task optimizer
+  2. CSI-Aware Multi-Task optimizer
+  3. No-CSI Single Task optimizer
+  4. No-CSI Multi-Task optimizer
+  5. Single-task baselines used by compare_to_baselines.py
+  6. Multi-task baselines used by compare_to_baselines_multi.py
 
 All tasks use InferenceTaskCallables (MLP on MNIST with Stein gradient oracle),
 as shown in src/core/task_callables.py.
@@ -38,6 +40,28 @@ from src.optimizers import (
     CSIAwareMultiTaskOptimizer,
     NoCSISingleTaskOptimizer,
     NoCSIMultiTaskOptimizer,
+)
+from src.optimizers.baseline import (
+    MaxCompressionSingleTaskBaseline,
+    NoCompressionSingleTaskBaseline,
+    UniformCompressionSingleTaskBaseline,
+    MyopicSingleTaskBaseline,
+    ConservativeSingleTaskBaseline,
+    MovingAverageSingleTaskBaseline,
+    MaxCompressionMultiTaskBaseline,
+    NoCompressionMultiTaskBaseline,
+    StaticEqualShareMultiTaskBaseline,
+    ProportionalResourceAllocationMultiTaskBaseline,
+    StrictPriorityGreedyMultiTaskBaseline,
+    DecoupledEqualSplitStochasticDescentMultiTaskBaseline,
+    QueueProportionalHeuristicMultiTaskBaseline,
+    HistoricalAverageCertaintyEquivalenceMultiTaskBaseline,
+)
+from src.optimizers.estimators import (
+    LastObservationEstimator,
+    RunningMinEstimator,
+    MovingAverageEstimator,
+    MeanEstimator,
 )
 
 # ---------------------------------------------------------------------------
@@ -304,17 +328,152 @@ def demo_no_csi_multi_task(api):
 
 
 # ---------------------------------------------------------------------------
+# Demo 5: Single-Task Baselines (from compare_to_baselines.py)
+# ---------------------------------------------------------------------------
+
+def demo_single_task_baselines(api):
+    print("\n" + "=" * 60)
+    print("DEMO 5: Single-Task Baselines")
+    print("=" * 60)
+    print("  Grouped exactly like compare_to_baselines.py")
+
+    task = make_task(task_id=1, api=api)
+    c_t = np.array([50.0, 70.0])
+
+    print("\n  CSI-aware baselines (instantiate -> set c_t -> optimize):")
+
+    max_comp = MaxCompressionSingleTaskBaseline(M=3, tasks=[task])
+    res = max_comp.optimize(t=0, c_t=c_t)
+    eta = res[1]["eta"]
+    print(f"    Baseline: max compression -> eta = {eta}, A = {task.A_k_true(eta):.4f}")
+
+    no_comp = NoCompressionSingleTaskBaseline(M=3, tasks=[task])
+    res = no_comp.optimize(t=0, c_t=c_t)
+    eta = res[1]["eta"]
+    print(f"    Baseline: no compression  -> eta = {eta}, A = {task.A_k_true(eta):.4f}")
+
+    uniform_comp = UniformCompressionSingleTaskBaseline(M=3, tasks=[task])
+    res = uniform_comp.optimize(t=0, c_t=c_t)
+    eta = res[1]["eta"]
+    print(f"    Baseline: uniform comp.  -> eta = {eta}, A = {task.A_k_true(eta):.4f}")
+
+    print("\n  No-CSI baselines (instantiate -> estimate c_hat -> optimize):")
+    print("    Note: single-task No-CSI baselines are estimator-based; they do not use dual queues.")
+
+    # Myopic
+    myopic_est = LastObservationEstimator(num_links=2, warmup_value=40.0)
+    myopic_est.update(c_t)
+    c_hat_myopic = myopic_est.estimate(1)
+    myopic = MyopicSingleTaskBaseline(M=3, tasks=[task])
+    res = myopic.optimize(t=1, c_hat=c_hat_myopic)
+    eta = res[1]["eta"]
+    print(f"    No-CSI Baseline: myopic        c_hat={c_hat_myopic} -> eta = {eta}")
+
+    # Conservative
+    cons_est = RunningMinEstimator(num_links=2, warmup_value=40.0)
+    cons_est.update(c_t)
+    c_hat_cons = cons_est.estimate(1)
+    conservative = ConservativeSingleTaskBaseline(M=3, tasks=[task])
+    res = conservative.optimize(t=1, c_hat=c_hat_cons)
+    eta = res[1]["eta"]
+    print(f"    No-CSI Baseline: conservative  c_hat={c_hat_cons} -> eta = {eta}")
+
+    # Moving average
+    ma_est = MovingAverageEstimator(num_links=2, window=5, warmup_value=40.0)
+    ma_est.update(c_t)
+    c_hat_ma = ma_est.estimate(1)
+    moving_avg = MovingAverageSingleTaskBaseline(M=3, tasks=[task])
+    res = moving_avg.optimize(t=1, c_hat=c_hat_ma)
+    eta = res[1]["eta"]
+    print(f"    No-CSI Baseline: moving avg    c_hat={c_hat_ma} -> eta = {eta}")
+
+
+# ---------------------------------------------------------------------------
+# Demo 6: Multi-Task Baselines (from compare_to_baselines_multi.py)
+# ---------------------------------------------------------------------------
+
+def demo_multi_task_baselines(api):
+    print("\n" + "=" * 60)
+    print("DEMO 6: Multi-Task Baselines")
+    print("=" * 60)
+    print("  Grouped exactly like compare_to_baselines_multi.py")
+
+    task1 = make_task(task_id=1, api=api, w_k=1.0)
+    task2 = make_task(task_id=2, api=api, w_k=2.0)
+    tasks = [task1, task2]
+    c_t = np.array([80.0, 80.0])
+    c_hat = np.array([70.0, 65.0])
+
+    print("\n  CSI-aware baselines (instantiate -> set c_t -> optimize):")
+
+    max_comp = MaxCompressionMultiTaskBaseline(M=3, tasks=tasks)
+    res = max_comp.optimize(t=0, c_t=c_t)
+    print(f"    Baseline: max compression -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    no_comp = NoCompressionMultiTaskBaseline(M=3, tasks=tasks)
+    res = no_comp.optimize(t=0, c_t=c_t)
+    print(f"    Baseline: no compression  -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    equal_share = StaticEqualShareMultiTaskBaseline(M=3, tasks=tasks)
+    res = equal_share.optimize(t=0, c_t=c_t)
+    print(f"    Baseline: equal-share     -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    proportional = ProportionalResourceAllocationMultiTaskBaseline(M=3, tasks=tasks)
+    res = proportional.optimize(t=0, c_t=c_t)
+    print(f"    Baseline: proportional    -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    strict_priority = StrictPriorityGreedyMultiTaskBaseline(M=3, tasks=tasks)
+    res = strict_priority.optimize(t=0, c_t=c_t)
+    print(f"    Baseline: strict priority -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    print("\n  No-CSI baselines (instantiate -> set c_hat -> optimize -> update_dual):")
+
+    decoupled = DecoupledEqualSplitStochasticDescentMultiTaskBaseline(
+        M=3, tasks=tasks, mu=1.0, epsilon=0.1
+    )
+    res = decoupled.optimize(t=0, c_hat=c_hat)
+    print(f"    No-CSI Baseline: decoupled equal-split -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+    decoupled.update_dual(t=0, actual_delays={1: 0.50, 2: 0.05})
+    print(f"      after update_dual: lambda1={decoupled.lambda_k[1]:.2f}, lambda2={decoupled.lambda_k[2]:.2f}")
+    res = decoupled.optimize(t=1, c_hat=c_hat)
+    print(f"      re-optimize(t=1): Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    queue_prop = QueueProportionalHeuristicMultiTaskBaseline(
+        M=3, tasks=tasks, mu=1.0, epsilon=0.1
+    )
+    res = queue_prop.optimize(t=0, c_hat=c_hat)
+    print(f"    No-CSI Baseline: queue-proportional   -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+    queue_prop.update_dual(t=0, actual_delays={1: 0.50, 2: 0.05})
+    print(f"      after update_dual: lambda1={queue_prop.lambda_k[1]:.2f}, lambda2={queue_prop.lambda_k[2]:.2f}")
+    res = queue_prop.optimize(t=1, c_hat=c_hat)
+    print(f"      re-optimize(t=1): Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
+
+    hist_mean = MeanEstimator(num_links=2, warmup_value=40.0, warmup=3)
+    hist_mean.update(c_t)
+    moving_average_c_hat = hist_mean.estimate(1)
+    certainty_eq = HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(M=3, tasks=tasks)
+    res = certainty_eq.optimize(t=1, c_hat=moving_average_c_hat)
+    print(
+        "    No-CSI Baseline: moving average (certainty equivalence)"
+        f" -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}"
+    )
+    print("      note: this baseline does not maintain dual queues (no update_dual).")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Inference Optimizer Demo – Four Optimizer Types with InferenceTaskCallables")
+    print("Inference Optimizer Demo – Optimizers + Baselines with InferenceTaskCallables")
     api, _ = setup_model_and_callables()
 
     demo_csi_aware_single_task(api)
     demo_csi_aware_multi_task(api)
     demo_no_csi_single_task(api)
     demo_no_csi_multi_task(api)
+    demo_single_task_baselines(api)
+    demo_multi_task_baselines(api)
 
     print("\n" + "=" * 60)
     print("All demos completed.")
