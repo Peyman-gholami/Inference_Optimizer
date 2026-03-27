@@ -7,3 +7,8 @@ matplotlib
 # For main.py demo (InferenceTaskCallables with MNIST)
 torch
 torchvision
+
+# LLM backend (HF + datasets)
+transformers>=4.41.2
+datasets>=2.19.2
+accelerate>=0.30.1

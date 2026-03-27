@@ -61,6 +61,7 @@ sys.path.insert(0, _root)
 sys.path.insert(0, os.path.join(_root, "src", "core"))
 
 from main import setup_model_and_callables, make_task  # noqa: E402
+from src.core.llm_plug_in import llm_use_measured_tau_a  # noqa: E402
 
 
 def _weighted_accuracy(tasks: List[InferenceTask], allocations: Dict[int, Dict[str, np.ndarray]]) -> float:
@@ -116,8 +117,8 @@ def run_compare(
         tasks.append(make_task(task_id=k + 1, api=api, w_k=(k+1)))
 
     # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
-    # This helps separate equal-share vs proportional vs priority baselines.
-    if len(tasks) >= 2:
+    # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
+    if len(tasks) >= 2 and not llm_use_measured_tau_a():
         # Task 1: smaller payloads (faster comm)
         tasks[0].a = {0: 5.0, 1: 40.0}
         # Task 2: larger payloads (slower comm)
@@ -223,8 +224,9 @@ def run_compare(
             else:
                 allocations = opt.optimize(t=t, c_t=c_t)
 
-            # if allocations is None:
-            #     continue
+            if allocations is None:
+                print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
+                continue
             print(f"algo: {name}, allocations: {allocations}")
             acc_hist[name][t] = _weighted_accuracy(tasks, allocations)
             delay_ratio_hist[name][t] = _avg_delay_over_invR(opt, tasks, t, allocations, c_t)
