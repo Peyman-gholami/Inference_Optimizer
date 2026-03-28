@@ -7,3 +7,4 @@ outputs/
 .pytest_cache/
 __pycache__/*
 outputs_mlp/
+sbatch_output/

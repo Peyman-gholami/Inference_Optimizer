@@ -18,6 +18,7 @@ For each experiment the 4 summary diagrams are:
 Each individual run also saves its own 4 per-run plots (same as compare_to_baselines.py).
 
 Usage:
+    export COMPRESSOR_TYPE=quantization # valid values topk (default), quantization, llmint8
     python run_param_sweep.py
     python run_param_sweep.py --T 100 --seed 12
     python run_param_sweep.py --baseline_algorithms none
@@ -28,9 +29,11 @@ Run Experiments
     python run_param_sweep.py --baseline_algorithms none
 
     # Only sigma sweep
+    export COMPRESSOR_TYPE=quantization # valid values topk (default), quantization, llmint8
     python run_param_sweep.py --baseline_algorithms none --experiments sigma --T 2
 
     # Only N sweep
+    export COMPRESSOR_TYPE=quantization # valid values topk (default), quantization, llmint8
     python run_param_sweep.py --baseline_algorithms none --experiments N
 
     # With baselines included
@@ -105,7 +108,10 @@ def setup_model_and_callables_patched(sigma: float = 0.05, N: int = 50):
 
     eta_init = torch.ones(2, device=device)
     from accuracy_fn import CompressedModel
-    cm = CompressedModel(model, eta_init)
+
+    compressor_type = os.environ.get("COMPRESSOR_TYPE", "topk").strip().lower()
+    print(f"Compression backend: {compressor_type}")
+    cm = CompressedModel(model, eta_init, compressor=compressor_type)
 
     # Wrap test_loader so every batch is pre-moved to device.
     class DeviceLoader:
@@ -130,6 +136,7 @@ def setup_model_and_callables_patched(sigma: float = 0.05, N: int = 50):
         n_samples=512,
         flat_theta=None,
         device=device,
+        compressor=compressor_type,
     )
     return api, flat_theta
 
@@ -690,8 +697,7 @@ def main() -> None:
     if "sigma" in experiments_to_run:
         run_experiment(
             param_name="sigma",
-            #param_values=[0.001, 0.01, 0.05, 0.1, 0.5],
-            param_values=[0.001, 0.01],
+            param_values=[0.001, 0.01, 0.05, 0.1, 0.5],
             fixed_sigma=0.05,   # not used (sigma is the sweep variable)
             fixed_N=50,
             base_out_dir=os.path.join(args.out_dir, "exp1_sigma_sweep"),

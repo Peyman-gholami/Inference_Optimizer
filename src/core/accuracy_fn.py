@@ -13,20 +13,98 @@ from torch.utils.data import DataLoader
 from stein_oracles import MLP, get_flat_params, set_flat_params
 from toy_A import grad_oracle
 
+# Optional: import the unified compressor library.
+# Falls back gracefully if compressors.py is not on the path.
+try:
+    from compressors import BaseCompressor, TopKCompressor, get_compressor as _get_compressor
+    _COMPRESSORS_AVAILABLE = True
+except ImportError:
+    _COMPRESSORS_AVAILABLE = False
+    BaseCompressor = object          # dummy so type hints don't crash
+
 
 # ─────────────────────────────────────────────
-# 1.  Top-k sparsification
+# 1.  Compressor helpers
 # ─────────────────────────────────────────────
 
-def topk_sparsify(x: torch.Tensor, eta: float) -> torch.Tensor:
+def _make_compressor(compressor):
+    """
+    Resolve *compressor* to a BaseCompressor instance.
+
+    Accepted values
+    ---------------
+    None / 'topk'           -> TopKCompressor  (default, original behaviour)
+    'quantization'          -> QuantizationCompressor
+    'llmint8'               -> LLMInt8Compressor
+    BaseCompressor instance -> used as-is
+    """
+    if not _COMPRESSORS_AVAILABLE:
+        # compressors.py not available — silently use the built-in fallback
+        return _BuiltinTopKCompressor()
+
+    if compressor is None or compressor == 'topk':
+        return TopKCompressor()
+    if isinstance(compressor, str):
+        return _get_compressor(compressor)
+    # Already an instance
+    return compressor
+
+
+class _BuiltinTopKCompressor:
+    """
+    Minimal fallback used when compressors.py is not importable.
+    Matches the BaseCompressor interface but does not require the library.
+    """
+    def compress(self, tensor, compression_params):
+        eta = float(compression_params)
+        if eta >= 1.0:
+            return {'passthrough': tensor}
+        flat = tensor.flatten()
+        k = max(1, int(eta * flat.numel()))
+        thresh = flat.abs().topk(k).values.min()
+        sparse = (flat * (flat.abs() >= thresh)).reshape(tensor.shape)
+        return {'passthrough': sparse}
+
+    def decompress(self, compressed, device='cpu'):
+        return compressed['passthrough'].to(device)
+
+    def get_compressed_size(self, compressed):
+        t = compressed['passthrough']
+        return t.numel() * t.element_size()
+
+    def get_name(self):
+        return "TopK(builtin)"
+
+
+def _compress_decompress(compressor, x: torch.Tensor, eta: float) -> torch.Tensor:
+    """
+    Round-trip a tensor through compress/decompress using *eta* as the
+    compression parameter.  Returns a tensor on the same device as *x*.
+
+    For TopKCompressor  : eta is the keep-fraction (k_ratio).
+    For QuantizationCompressor: eta is mapped to the nearest supported
+        bit-width level (0.5->FP16, 0.25->INT8, 0.125->INT4, 0.0625->INT2).
+    For LLMInt8Compressor: eta is used as the outlier ratio, with FP16
+        outliers and INT8 regular values as defaults.
+    """
     if eta >= 1.0:
-        return x
-    if eta <= 0.0:
-        return torch.zeros_like(x)
-    flat   = x.flatten()
-    k      = max(1, int(eta * flat.numel()))
-    thresh = flat.abs().topk(k).values.min()
-    return (flat * (flat.abs() >= thresh)).reshape(x.shape)
+        return x                              # no compression needed
+
+    device = x.device
+    tensor_cpu = x.detach().cpu()
+
+    # Build compression_params depending on compressor type
+    name = compressor.get_name().lower() if hasattr(compressor, 'get_name') else ''
+    if 'llmint8' in name or 'llm' in name:
+        # eta is the outlier fraction; use sensible precision defaults
+        params = [eta, 'fp16', 'int8']
+    else:
+        # TopK and Quantization both accept a plain float
+        params = eta
+
+    compressed = compressor.compress(tensor_cpu, params)
+    restored = compressor.decompress(compressed, device='cpu')
+    return restored.to(device)
 
 
 # ─────────────────────────────────────────────
@@ -37,28 +115,36 @@ def topk_sparsify(x: torch.Tensor, eta: float) -> torch.Tensor:
 
 class CompressedModel(nn.Module):
     """
-    Wraps base_model with persistent top-k sparsification hooks.
+    Wraps base_model with persistent activation-compression hooks.
     Hooks are registered once and never removed — update eta in-place.
 
     Parameters
     ----------
     base_model  : nn.Module
-    eta         : Tensor (d,) -- initial compression ratios
-    cut_modules : list of nn.Module -- layers after which to sparsify.
+    eta         : Tensor (d,) -- initial compression ratios (one per cut-point)
+    cut_modules : list of nn.Module -- layers after which to compress.
                   Defaults to all ReLU/Tanh/GELU/Sigmoid layers.
+    compressor  : None | str | BaseCompressor
+                  Compression backend to use at every cut-point.
+                  - None / 'topk'      -> TopKCompressor  (default)
+                  - 'quantization'     -> QuantizationCompressor
+                  - 'llmint8'          -> LLMInt8Compressor
+                  - BaseCompressor obj -> used directly
 
     Usage
     -----
-    cm = CompressedModel(model, eta)
+    cm = CompressedModel(model, eta)                        # TopK (default)
+    cm = CompressedModel(model, eta, compressor='quantization')
     cm.set_eta(new_eta)     # update in-place, no new hooks
     out = cm(x)
     """
 
     def __init__(self, base_model: nn.Module, eta: torch.Tensor,
-                 cut_modules=None):
+                 cut_modules=None, compressor=None):
         super().__init__()
         self.base_model = base_model
         self.eta        = eta.clone()
+        self.compressor = _make_compressor(compressor)
 
         if cut_modules is None:
             cut_modules = [m for m in base_model.modules()
@@ -74,12 +160,19 @@ class CompressedModel(nn.Module):
 
     def _make_hook(self, i: int):
         def hook(module, input, output):
-            return topk_sparsify(output, self.eta[i].item())
+            return _compress_decompress(self.compressor, output, self.eta[i].item())
         return hook
 
     def set_eta(self, eta: torch.Tensor):
         assert len(eta) == self.d
         self.eta = eta.clone()
+
+    def set_compressor(self, compressor):
+        """
+        Swap the compressor at runtime without re-registering hooks.
+        Accepts the same values as the constructor's compressor parameter.
+        """
+        self.compressor = _make_compressor(compressor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.base_model(x)

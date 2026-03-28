@@ -127,8 +127,14 @@ def setup_model_and_callables():
 
     # 2 cut-points (links) -> 3-node chain topology
     eta_init = torch.ones(2, device=device)
+
+    # Compression backend: topk (default) | quantization | llmint8
+    # Override via:  export COMPRESSOR_TYPE=quantization
+    compressor_type = os.environ.get("COMPRESSOR_TYPE", "topk").strip().lower()
+    print(f"Compression backend: {compressor_type}")
+
     from accuracy_fn import CompressedModel
-    cm = CompressedModel(model, eta_init)
+    cm = CompressedModel(model, eta_init, compressor=compressor_type)
 
     # Wrap test_loader so every batch is pre-moved to device.
     class DeviceLoader:
@@ -153,6 +159,7 @@ def setup_model_and_callables():
         n_samples=512,
         flat_theta=None,   # model already has trained weights — no swap needed (saves time)
         device=device,
+        compressor=compressor_type,
     )
 
     return api, flat_theta
