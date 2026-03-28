@@ -18,7 +18,6 @@ For each experiment the 4 summary diagrams are:
 Each individual run also saves its own 4 per-run plots (same as compare_to_baselines.py).
 
 Usage:
-    export COMPRESSOR_TYPE=quantization # valid values topk (default), quantization, llmint8
     python run_param_sweep.py
     python run_param_sweep.py --T 100 --seed 12
     python run_param_sweep.py --baseline_algorithms none
@@ -29,11 +28,9 @@ Run Experiments
     python run_param_sweep.py --baseline_algorithms none
 
     # Only sigma sweep
-    export COMPRESSOR_TYPE=quantization # valid values topk (default), quantization, llmint8
-    python run_param_sweep.py --baseline_algorithms none --experiments sigma --T 2
+    python run_param_sweep.py --baseline_algorithms none --experiments sigma
 
     # Only N sweep
-    export COMPRESSOR_TYPE=quantization # valid values topk (default), quantization, llmint8
     python run_param_sweep.py --baseline_algorithms none --experiments N
 
     # With baselines included
@@ -64,9 +61,49 @@ sys.path.insert(0, os.path.join(_root, "src", "core"))
 
 def setup_model_and_callables_patched(sigma: float = 0.05, N: int = 50):
     """
-    Identical to main.setup_model_and_callables() but exposes sigma and N
-    so they can be varied across experiments.
+    Backend-aware version of main.setup_model_and_callables() that also
+    accepts sigma and N so they can be varied across sweep experiments.
+
+    Respects INFERENCE_OPTIMIZER_BACKEND:
+      (unset / 'mnist') -> MLP on MNIST  (sigma and N are used)
+      'resnet'          -> ResNet56 on CIFAR-10  (sigma and N override env defaults)
+      'llm'             -> LLM/MMLU  (sigma and N override env defaults)
     """
+    from src.core.llm_plug_in import is_llm_backend, is_resnet_backend
+
+    # ------------------------------------------------------------------ #
+    # LLM backend                                                          #
+    # ------------------------------------------------------------------ #
+    if is_llm_backend():
+        from src.core.llm_task_callables import build_llm_backend_from_env
+        eta_min = min(
+            float(os.environ.get("ETA_MIN0", "0.25")),
+            float(os.environ.get("ETA_MIN1", "0.25")),
+        )
+        api = build_llm_backend_from_env(eta_min=eta_min)
+        # Override Stein oracle params with sweep values
+        api.config = api.config.__class__(
+            **{**api.config.__dict__, 'grad_sigma': sigma, 'grad_N': N}
+        )
+        print(f"  [LLM backend] sigma={sigma}, N={N}")
+        return api, None
+
+    # ------------------------------------------------------------------ #
+    # ResNet backend                                                       #
+    # ------------------------------------------------------------------ #
+    if is_resnet_backend():
+        from src.core.resnet_task_callables import build_resnet_backend_from_env
+        # build_resnet_backend_from_env reads RESNET_GRAD_SIGMA / RESNET_GRAD_N
+        # from env; override them here with the sweep values.
+        os.environ["RESNET_GRAD_SIGMA"] = str(sigma)
+        os.environ["RESNET_GRAD_N"]     = str(N)
+        api = build_resnet_backend_from_env()
+        print(f"  [ResNet backend] sigma={sigma}, N={N}")
+        return api, None
+
+    # ------------------------------------------------------------------ #
+    # Default: MLP on MNIST                                                #
+    # ------------------------------------------------------------------ #
     import torch
     import torch.nn.functional as F
     from torchvision import datasets, transforms
@@ -99,7 +136,7 @@ def setup_model_and_callables_patched(sigma: float = 0.05, N: int = 50):
     for _ in range(3):
         model.train()
         for x, y in train_loader:
-            x, y = x.to(device), y.to(device)  # move batch to device
+            x, y = x.to(device), y.to(device)
             opt_model.zero_grad()
             F.cross_entropy(model(x), y).backward()
             opt_model.step()
@@ -110,7 +147,6 @@ def setup_model_and_callables_patched(sigma: float = 0.05, N: int = 50):
     from accuracy_fn import CompressedModel
 
     compressor_type = os.environ.get("COMPRESSOR_TYPE", "topk").strip().lower()
-    print(f"Compression backend: {compressor_type}")
     cm = CompressedModel(model, eta_init, compressor=compressor_type)
 
     # Wrap test_loader so every batch is pre-moved to device.
@@ -199,8 +235,11 @@ def run_single(
 
     api, _ = setup_model_and_callables_patched(sigma=sigma, N=N)
     task = make_task(task_id=1, api=api)
-    M = 3
-    num_links = M - 1
+
+    # Derive topology from the task itself so this works for any backend.
+    # MLP/LLM: L_k=3 (3 nodes, 2 links).  ResNet default: L_k=4 (4 nodes, 3 links).
+    M = task.L_k
+    num_links = task.L_k - 1
 
     # ---- Build algorithm list (same as run_compare) -------------------------
     algos: List[Tuple[str, BaseOptimizer]] = [
@@ -697,7 +736,8 @@ def main() -> None:
     if "sigma" in experiments_to_run:
         run_experiment(
             param_name="sigma",
-            param_values=[0.001, 0.01, 0.05, 0.1, 0.5],
+            #param_values=[0.001, 0.01, 0.05, 0.1, 0.5],
+            param_values=[0.001, 0.01],
             fixed_sigma=0.05,   # not used (sigma is the sweep variable)
             fixed_N=50,
             base_out_dir=os.path.join(args.out_dir, "exp1_sigma_sweep"),

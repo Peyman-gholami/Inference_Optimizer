@@ -14,6 +14,10 @@ def is_llm_backend() -> bool:
     return os.environ.get("INFERENCE_OPTIMIZER_BACKEND", "mnist").strip().lower() == "llm"
 
 
+def is_resnet_backend() -> bool:
+    return os.environ.get("INFERENCE_OPTIMIZER_BACKEND", "mnist").strip().lower() == "resnet"
+
+
 def llm_use_measured_tau_a() -> bool:
     v = os.environ.get("LLM_USE_MEASURED_TAU_A", "").strip().lower()
     return v in {"1", "true", "yes"}
