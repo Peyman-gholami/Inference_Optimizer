@@ -5,3 +5,5 @@ src/optimizers/__pycache__/*
 .venv/
 outputs/
 .pytest_cache/
+__pycache__/*
+outputs_mlp/

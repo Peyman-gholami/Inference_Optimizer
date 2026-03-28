@@ -91,7 +91,8 @@ def setup_model_and_callables():
         return api, None
 
     torch.manual_seed(42)
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training MLP on device: {device}")
 
     # Data loaders
     tf = transforms.Compose([
@@ -117,6 +118,7 @@ def setup_model_and_callables():
     for _ in range(3):
         model.train()
         for x, y in train_loader:
+            x, y = x.to(device), y.to(device)
             opt.zero_grad()
             F.cross_entropy(model(x), y).backward()
             opt.step()
@@ -124,12 +126,28 @@ def setup_model_and_callables():
     flat_theta = get_flat_params(model)
 
     # 2 cut-points (links) -> 3-node chain topology
-    eta_init = torch.ones(2)
+    eta_init = torch.ones(2, device=device)
     from accuracy_fn import CompressedModel
     cm = CompressedModel(model, eta_init)
+
+    # Wrap test_loader so every batch is pre-moved to device.
+    class DeviceLoader:
+        def __init__(self, loader, dev):
+            self._loader = loader
+            self._dev = dev
+        def __iter__(self):
+            for x, y in self._loader:
+                yield x.to(self._dev), y.to(self._dev)
+        def __len__(self):
+            return len(self._loader)
+        def __getattr__(self, name):
+            return getattr(self._loader, name)
+
+    device_test_loader = DeviceLoader(test_loader, device)
+
     api = InferenceTaskCallables(
         cm,
-        test_loader,
+        device_test_loader,
         sigma=0.05,
         N=50,
         n_samples=512,
