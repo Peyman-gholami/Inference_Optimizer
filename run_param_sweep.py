@@ -241,6 +241,30 @@ def run_single(
     M = task.L_k
     num_links = task.L_k - 1
 
+    # ---- Override c_min/c_max for backends with real payload sizes -----------
+    # The default c_min=10, c_max=150 were designed for the MLP toy values
+    # (a[i] ~ 10-20).  For ResNet, a[i] is in bytes (~tens of thousands), so
+    # those defaults make every CSI-aware slot infeasible.
+    # We derive feasibility-aware bounds from the task's own a, eta_min, R_k.
+    #   c_min_link = a[i] * eta_min[i] * R_k   (minimum for feasibility)
+    #   c_min      = max over links             (tightest constraint)
+    #   c_max      = c_min * 10                 (one decade of headroom)
+    R_k = task.get_R_k(0)
+    c_min_per_link = [
+        task.a[task.b_k + i] * task.eta_min[task.b_k + i] * R_k
+        for i in range(num_links)
+    ]
+    c_min_feasible = max(c_min_per_link)
+    if c_min_feasible > c_min:
+        # Backend has real payload sizes — override the passed-in values
+        c_min = c_min_feasible * 1.1    # just above feasibility floor
+        c_max = c_min_feasible * 10.0   # one decade of range
+        print(f"  [run_single] c_min/c_max overridden for backend: "
+              f"c_min={c_min:.1f}, c_max={c_max:.1f} "
+              f"(derived from a={[task.a[task.b_k+i] for i in range(num_links)]}, "
+              f"eta_min={[task.eta_min[task.b_k+i] for i in range(num_links)]}, "
+              f"R_k={R_k})", flush=True)
+
     # ---- Build algorithm list (same as run_compare) -------------------------
     algos: List[Tuple[str, BaseOptimizer]] = [
         ("CSI-aware (optimal)", CSIAwareSingleTaskOptimizer(M=M, tasks=[task]))
@@ -321,7 +345,7 @@ def run_single(
 
     # ---- Simulation loop ----------------------------------------------------
     for t in range(T):
-        print(f"  [sigma={sigma}, N={N}] t={t}")
+        print(f"  [sigma={sigma}, N={N}] t={t}", flush=True)
         c_t = rng.uniform(low=c_min, high=c_max, size=num_links).astype(float)
 
         for name, opt in algos:
@@ -520,6 +544,19 @@ def plot_summary(
             ax.set_title(algo_label, fontsize=10)
             ax.grid(True, alpha=0.3)
             ax.legend(ncol=1, fontsize=8)
+            # Guard: if this panel has no valid data (all-NaN), set explicit
+            # axis limits so sharey does not inherit a degenerate scale.
+            lines = ax.get_lines()
+            has_data = any(
+                np.any(np.isfinite(line.get_ydata())) for line in lines
+                if len(line.get_ydata()) > 0
+            )
+            if not has_data:
+                ax.set_xlim(0, T)
+                ax.set_ylim(0, 1)
+                ax.text(0.5, 0.5, "No feasible slots",
+                        transform=ax.transAxes, ha='center', va='center',
+                        fontsize=12, color='grey')
 
         ax_left.set_ylabel(ylabel)
         fig.suptitle(f"{suptitle}  (varying {param_name})", fontsize=12)
@@ -535,7 +572,7 @@ def plot_summary(
         filename=f"summary_accuracy_over_time_vs_{param_name}.png",
         add_hline=False,
     )
-    print(f"  Saved summary diagram 1 (accuracy over time vs {param_name})")
+    print(f"  Saved summary diagram 1 (accuracy over time vs {param_name})", flush=True)
 
     # ---- Diagram 2: delay/invR over time (side-by-side) ---------------------
     _draw_side_by_side(
@@ -545,7 +582,7 @@ def plot_summary(
         filename=f"summary_delay_over_time_vs_{param_name}.png",
         add_hline=True,
     )
-    print(f"  Saved summary diagram 2 (delay over time vs {param_name})")
+    print(f"  Saved summary diagram 2 (delay over time vs {param_name})", flush=True)
 
     # ---- Diagrams 3 & 4: bar charts (all algos) -----------------------------
     algo_names = [name for name, _ in all_algos[0]]
@@ -585,7 +622,7 @@ def plot_summary(
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f"summary_final_accuracy_vs_{param_name}.png"), dpi=180)
     plt.close()
-    print(f"  Saved summary diagram 3 (final accuracy bar chart vs {param_name})")
+    print(f"  Saved summary diagram 3 (final accuracy bar chart vs {param_name})", flush=True)
 
     # ---- Diagram 4: final delay bar chart -----------------------------------
     fig, ax = plt.subplots(figsize=(max(10, len(param_values) * 2), 6))
@@ -613,7 +650,7 @@ def plot_summary(
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f"summary_final_delay_vs_{param_name}.png"), dpi=180)
     plt.close()
-    print(f"  Saved summary diagram 4 (final delay bar chart vs {param_name})")
+    print(f"  Saved summary diagram 4 (final delay bar chart vs {param_name})", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -634,9 +671,9 @@ def run_experiment(
     no_csi_mu: float,
     no_csi_epsilon: float,
 ) -> None:
-    print(f"\n{'='*60}")
-    print(f"EXPERIMENT: varying {param_name} = {param_values}")
-    print(f"{'='*60}")
+    print(f"\n{'='*60}", flush=True)
+    print(f"EXPERIMENT: varying {param_name} = {param_values}", flush=True)
+    print(f"{'='*60}", flush=True)
 
     all_acc_avg = []
     all_delay_avg = []
@@ -649,7 +686,7 @@ def run_experiment(
         run_label = f"{param_name}={pval}"
         run_out_dir = os.path.join(base_out_dir, run_label.replace("=", "_").replace(".", "p"))
 
-        print(f"\n--- Run: {run_label} ---")
+        print(f"\n--- Run: {run_label} ---", flush=True)
         acc_avg, delay_avg, algos = run_single(
             T=T,
             seed=seed,
@@ -676,7 +713,7 @@ def run_experiment(
         T=T,
         out_dir=summary_dir,
     )
-    print(f"\nSummary diagrams saved to: {summary_dir}")
+    print(f"\nSummary diagrams saved to: {summary_dir}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -689,8 +726,10 @@ def main() -> None:
     )
     p.add_argument("--T", type=int, default=100)
     p.add_argument("--seed", type=int, default=12)
-    p.add_argument("--c_min", type=float, default=10.0)
-    p.add_argument("--c_max", type=float, default=150.0)
+    p.add_argument("--c_min", type=float, default=10.0,
+                   help="Channel min (MLP default). Auto-overridden for ResNet/LLM based on task payload sizes.")
+    p.add_argument("--c_max", type=float, default=150.0,
+                   help="Channel max (MLP default). Auto-overridden for ResNet/LLM based on task payload sizes.")
     p.add_argument("--mu", type=float, default=3.0)
     p.add_argument("--epsilon", type=float, default=0.1)
     p.add_argument("--out_dir", type=str, default="outputs/param_sweep")
@@ -710,7 +749,131 @@ def main() -> None:
         default="sigma,N",
         help="Which experiments to run. Comma-separated subset of: sigma, N.",
     )
+    p.add_argument(
+        "--sigma_values",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated sigma values for sigma sweep. "
+            "MLP default: 0.001,0.01,0.05,0.1,0.5  "
+            "ResNet recommended: 0.001,0.01,0.05,0.1,0.5 (same, but use small N)"
+        ),
+    )
+    p.add_argument(
+        "--N_values",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated N values for N sweep. "
+            "MLP default: 10,25,50,75,100  "
+            "ResNet recommended: 2,5,10,20  (each eval is ~1s on GPU)"
+        ),
+    )
+    p.add_argument(
+        "--fixed_N",
+        type=int,
+        default=None,
+        help=(
+            "Fixed N used during sigma sweep. "
+            "MLP default: 50.  ResNet recommended: 5  "
+            "(2N forward passes per slot — keep small to avoid hour-long waits)"
+        ),
+    )
+    p.add_argument(
+        "--fixed_sigma",
+        type=float,
+        default=0.05,
+        help="Fixed sigma used during N sweep (default: 0.05).",
+    )
     args = p.parse_args()
+
+    # ------------------------------------------------------------------ #
+    # Detect backend and set sensible defaults                             #
+    # ------------------------------------------------------------------ #
+    backend = os.environ.get("INFERENCE_OPTIMIZER_BACKEND", "mnist").strip().lower()
+    is_resnet = backend == "resnet"
+    is_llm    = backend == "llm"
+
+    # Fixed N for sigma sweep: user override > backend default
+    if args.fixed_N is not None:
+        fixed_N = args.fixed_N
+    elif is_resnet or is_llm:
+        fixed_N = 5       # ResNet/LLM: each eval is expensive
+    else:
+        fixed_N = 50      # MLP: evals are fast
+
+    # Sigma sweep values
+    if args.sigma_values is not None:
+        sigma_values = [float(x.strip()) for x in args.sigma_values.split(",") if x.strip()]
+    else:
+        sigma_values = [0.001, 0.01, 0.05, 0.1, 0.5]   # same for all backends
+
+    # N sweep values
+    if args.N_values is not None:
+        N_values = [int(x.strip()) for x in args.N_values.split(",") if x.strip()]
+    elif is_resnet or is_llm:
+        N_values = [2, 5, 10, 20]    # ResNet/LLM: each N adds ~2s per time slot
+    else:
+        N_values = [10, 25, 50, 75, 100]
+
+    # ------------------------------------------------------------------ #
+    # Print configuration summary (flush=True for Slurm log visibility)   #
+    # ------------------------------------------------------------------ #
+    print("=" * 60, flush=True)
+    print("run_param_sweep.py  —  Configuration", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  Backend               : {backend}", flush=True)
+    print(f"  T (time slots)        : {args.T}", flush=True)
+    print(f"  seed                  : {args.seed}", flush=True)
+    print(f"  c_min / c_max         : {args.c_min} / {args.c_max}", flush=True)
+    print(f"  mu / epsilon          : {args.mu} / {args.epsilon}", flush=True)
+    print(f"  out_dir               : {args.out_dir}", flush=True)
+    print(f"  baseline_algorithms   : {args.baseline_algorithms}", flush=True)
+    print(f"  experiments           : {args.experiments}", flush=True)
+    print(f"  sigma_values (sweep)  : {sigma_values}", flush=True)
+    print(f"  N_values (sweep)      : {N_values}", flush=True)
+    print(f"  fixed_N (sigma sweep) : {fixed_N}", flush=True)
+    print(f"  fixed_sigma (N sweep) : {args.fixed_sigma}", flush=True)
+    print("", flush=True)
+    print("  Environment variables:", flush=True)
+    _ENV_VARS = [
+        "INFERENCE_OPTIMIZER_BACKEND",
+        "RESNET_CHECKPOINT",
+        "RESNET_DATA_ROOT",
+        "RESNET_CUTPOINTS",
+        "RESNET_BATCH_SIZE",
+        "RESNET_FAST_BATCHES",
+        "RESNET_GRAD_SIGMA",
+        "RESNET_GRAD_N",
+        "COMPRESSOR_TYPE",
+        "ETA_MIN0",
+        "ETA_MIN1",
+        "R_K",
+        "LLM_MODEL_NAME",
+        "LLM_ACTIVATION_STRATEGY",
+        "MMLU_FAST_SAMPLES_PER_SUBJECT",
+    ]
+    for var in _ENV_VARS:
+        val = os.environ.get(var, "(not set)")
+        print(f"    {var:<35} = {val}", flush=True)
+    print("=" * 60, flush=True)
+
+    # ------------------------------------------------------------------ #
+    # Runtime estimate                                                     #
+    # ------------------------------------------------------------------ #
+    if is_resnet:
+        algos_count = 2  # CSI-aware + No-CSI (no baselines by default)
+        evals_per_slot = algos_count * 2 * fixed_N   # 2N per gradient call
+        secs_per_eval = 1.5   # rough estimate: 1 batch, 3 partitions, topk
+        est_hours_per_run = (args.T * evals_per_slot * secs_per_eval) / 3600
+        n_runs = len(sigma_values) if "sigma" in args.experiments else 0
+        n_runs += len(N_values) if "n" in args.experiments.lower() else 0
+        print(f"  ⏱  ResNet time estimate per run : ~{est_hours_per_run:.1f} h  "
+              f"(T={args.T}, fixed_N={fixed_N}, ~{secs_per_eval}s/eval)", flush=True)
+        print(f"  ⏱  Total runs                  : {n_runs}  "
+              f"=> ~{n_runs * est_hours_per_run:.1f} h sequential  "
+              f"(use --parallel mode to run each as a separate Slurm job)", flush=True)
+        print("", flush=True)
 
     baseline_arg = args.baseline_algorithms.strip().lower()
     baseline_algorithms: Optional[List[str]] = (
@@ -731,33 +894,32 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Experiment 1: sigma sweep  (N=50 fixed)
+    # Experiment 1: sigma sweep
     # ------------------------------------------------------------------
     if "sigma" in experiments_to_run:
         run_experiment(
             param_name="sigma",
-            #param_values=[0.001, 0.01, 0.05, 0.1, 0.5],
-            param_values=[0.001, 0.01],
-            fixed_sigma=0.05,   # not used (sigma is the sweep variable)
-            fixed_N=50,
+            param_values=sigma_values,
+            fixed_sigma=args.fixed_sigma,
+            fixed_N=fixed_N,
             base_out_dir=os.path.join(args.out_dir, "exp1_sigma_sweep"),
             **common,
         )
 
     # ------------------------------------------------------------------
-    # Experiment 2: N sweep  (sigma=0.05 fixed)
+    # Experiment 2: N sweep
     # ------------------------------------------------------------------
     if "n" in experiments_to_run:
         run_experiment(
             param_name="N",
-            param_values=[10, 25, 50, 75, 100],
-            fixed_sigma=0.05,
-            fixed_N=50,         # not used (N is the sweep variable)
+            param_values=N_values,
+            fixed_sigma=args.fixed_sigma,
+            fixed_N=fixed_N,
             base_out_dir=os.path.join(args.out_dir, "exp2_N_sweep"),
             **common,
         )
 
-    print("\nAll experiments completed.")
+    print("\nAll experiments completed.", flush=True)
 
 
 if __name__ == "__main__":

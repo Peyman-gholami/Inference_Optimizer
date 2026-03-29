@@ -105,11 +105,12 @@ def run_compare(
  ) -> Tuple[str, str, str]:
     rng = np.random.default_rng(seed)
 
-    # Single task and topology (M=3 -> 2 links)
+    # Single task — topology derived from the task itself so this works for
+    # any backend (MLP: L_k=3 / 2 links, ResNet default: L_k=4 / 3 links).
     api, _ = setup_model_and_callables()
     task = make_task(task_id=1, api=api)
-    M = 3
-    num_links = M - 1
+    M = task.L_k
+    num_links = task.L_k - 1
 
     # Algorithms
     algos: List[Tuple[str, BaseOptimizer]] = [("CSI-aware (optimal)", CSIAwareSingleTaskOptimizer(M=M, tasks=[task]))]

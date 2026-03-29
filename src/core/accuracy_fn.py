@@ -35,18 +35,33 @@ def _make_compressor(compressor):
     ---------------
     None / 'topk'           -> TopKCompressor  (default, original behaviour)
     'quantization'          -> QuantizationCompressor
-    'llmint8'               -> LLMInt8Compressor
     BaseCompressor instance -> used as-is
+
+    LLMInt8 is intentionally excluded.  Its row-wise AbsMax scaling assumes
+    a transformer [batch, seq_len, hidden_dim] layout.  MLP activations are
+    1-D vectors after each ReLU — a fundamentally different shape — so
+    LLMInt8 does not apply here and is rejected with a clear message.
     """
     if not _COMPRESSORS_AVAILABLE:
         # compressors.py not available — silently use the built-in fallback
         return _BuiltinTopKCompressor()
 
-    if compressor is None or compressor == 'topk':
-        return TopKCompressor()
     if isinstance(compressor, str):
+        name = compressor.strip().lower()
+        if name in ('llmint8', 'llm_int8', 'llm.int8'):
+            raise ValueError(
+                f"COMPRESSOR_TYPE='{compressor}' is not supported for the MLP backend. "
+                f"Choose from: topk, quantization.  "
+                f"(LLMInt8 is designed for transformer hidden states, not MLP activations.)"
+            )
+        if name == 'topk':
+            return TopKCompressor()
         return _get_compressor(compressor)
-    # Already an instance
+
+    if compressor is None:
+        return TopKCompressor()
+
+    # Already a BaseCompressor instance — used as-is
     return compressor
 
 

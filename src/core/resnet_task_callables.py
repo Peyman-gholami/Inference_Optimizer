@@ -450,7 +450,7 @@ def build_resnet_backend_from_env() -> ResNetTaskCallables:
     RESNET_BATCH_SIZE   int                          (default: 100)
     RESNET_FAST_BATCHES int or 'all'                 (default: 2)
     RESNET_DOWNLOAD     1 / 0                        (default: 1)
-    COMPRESSOR_TYPE     topk | quantization | llmint8 (default: topk)
+    COMPRESSOR_TYPE     topk | quantization | llmint8   (default: topk)
     RESNET_GRAD_SIGMA   float                        (default: 0.05)
     RESNET_GRAD_N       int                          (default: 20)
     """

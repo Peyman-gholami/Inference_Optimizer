@@ -107,22 +107,25 @@ def run_compare(
 
     api, _ = setup_model_and_callables()
 
-    # Topology (fixed by make_task): 3 nodes -> 2 links
-    M = 3
-    num_links = M - 1
-
-    # Tasks (all share the same path in current demo)
+    # Topology derived from the task itself so this works for any backend
+    # (MLP: L_k=3 / 2 links, ResNet default: L_k=4 / 3 links).
     tasks: List[InferenceTask] = []
     for k in range(K):
         tasks.append(make_task(task_id=k + 1, api=api, w_k=(k+1)))
 
-    # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
+    M = tasks[0].L_k
+    num_links = tasks[0].L_k - 1
+
+    # Make tasks heterogeneous: scale per-link data sizes proportionally so
+    # the heterogeneity makes sense for any number of links and any backend.
     # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
-    if len(tasks) >= 2 and not llm_use_measured_tau_a():
-        # Task 1: smaller payloads (faster comm)
-        tasks[0].a = {0: 5.0, 1: 40.0}
-        # Task 2: larger payloads (slower comm)
-        tasks[1].a = {0: 20.0, 1: 25.0}
+    # Also skip for the ResNet backend where `a` is set from real measured bytes.
+    from src.core.llm_plug_in import is_resnet_backend
+    if len(tasks) >= 2 and not llm_use_measured_tau_a() and not is_resnet_backend():
+        # Task 1: smaller payloads (faster comm) — scale base a by 0.5
+        tasks[0].a = {i: tasks[0].a[i] * 0.5 for i in range(num_links)}
+        # Task 2: larger payloads (slower comm) — scale base a by 2.0
+        tasks[1].a = {i: tasks[1].a[i] * 2.0 for i in range(num_links)}
 
     # Algorithms
     csi_opt = CSIAwareMultiTaskOptimizer(M=M, tasks=tasks)
