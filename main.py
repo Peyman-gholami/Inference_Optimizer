@@ -90,14 +90,8 @@ def setup_model_and_callables():
         api = build_llm_backend_from_env(eta_min=eta_min)
         return api, None
 
-    if is_resnet_backend():
-        from src.core.resnet_task_callables import build_resnet_backend_from_env
-        api = build_resnet_backend_from_env()
-        return api, None
-
     torch.manual_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training MLP on device: {device}")
+    device = torch.device("cpu")
 
     # Data loaders
     tf = transforms.Compose([
@@ -123,7 +117,6 @@ def setup_model_and_callables():
     for _ in range(3):
         model.train()
         for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
             opt.zero_grad()
             F.cross_entropy(model(x), y).backward()
             opt.step()
@@ -131,40 +124,18 @@ def setup_model_and_callables():
     flat_theta = get_flat_params(model)
 
     # 2 cut-points (links) -> 3-node chain topology
-    eta_init = torch.ones(2, device=device)
-
-    # Compression backend: topk (default) | quantization | llmint8
-    # Override via:  export COMPRESSOR_TYPE=quantization
-    compressor_type = os.environ.get("COMPRESSOR_TYPE", "topk").strip().lower()
-    print(f"Compression backend: {compressor_type}")
-
+    eta_init = torch.ones(2)
     from accuracy_fn import CompressedModel
+    compressor_type = os.environ.get("COMPRESSOR_TYPE", "topk").strip().lower()
     cm = CompressedModel(model, eta_init, compressor=compressor_type)
-
-    # Wrap test_loader so every batch is pre-moved to device.
-    class DeviceLoader:
-        def __init__(self, loader, dev):
-            self._loader = loader
-            self._dev = dev
-        def __iter__(self):
-            for x, y in self._loader:
-                yield x.to(self._dev), y.to(self._dev)
-        def __len__(self):
-            return len(self._loader)
-        def __getattr__(self, name):
-            return getattr(self._loader, name)
-
-    device_test_loader = DeviceLoader(test_loader, device)
-
     api = InferenceTaskCallables(
         cm,
-        device_test_loader,
+        test_loader,
         sigma=0.05,
         N=50,
         n_samples=512,
         flat_theta=None,   # model already has trained weights — no swap needed (saves time)
         device=device,
-        compressor=compressor_type,
     )
 
     return api, flat_theta
@@ -219,73 +190,64 @@ def make_task(task_id: int, api: Any, w_k: float = 1.0) -> InferenceTask:
         eta_min0 = float(os.environ.get("ETA_MIN0", "0.1"))
         eta_min1 = float(os.environ.get("ETA_MIN1", "0.05"))
 
+    r_k = float(os.environ.get("R_K", os.environ.get("MEASURED_R_K", "10.0")))
+
+    # ------------------------------------------------------------------ #
+    # ResNet backend — topology comes from the api (num_links, measured_a)
+    # ------------------------------------------------------------------ #
+    if is_resnet_backend():
+        num_links  = api.num_links                      # e.g. 3 for cutpoints=[8,14,21]
+        num_nodes  = num_links + 1                      # e.g. 4
+        raw_a      = api.measured_a()                   # {link_idx: bytes_per_sample}
+        a          = {i: float(raw_a[i]) for i in range(num_links)}
+        tau        = {i: 0.001 for i in range(num_nodes)}
+        eta_min0   = float(os.environ.get("ETA_MIN0", "0.125"))
+        eta_min1   = float(os.environ.get("ETA_MIN1", "0.125"))
+        eta_min    = {0: eta_min0, **{i: eta_min1 for i in range(1, num_links)}}
+
+        print(f"[make_task] ResNet topology: L_k={num_nodes}  num_links={num_links}",
+              flush=True)
+        print(f"[make_task] a (bytes/sample) = "
+              f"{[f'{a[i]:.0f}' for i in range(num_links)]}",
+              flush=True)
+
+        return InferenceTask(
+            task_id=task_id,
+            b_k=0,
+            L_k=num_nodes,
+            tau=tau,
+            a=a,
+            eta_min=eta_min,
+            R_k_callable=lambda t, r=r_k: r,
+            w_k=w_k,
+            accuracy_callable=api.accuracy_callable,
+            accuracy_callable_true=api.accuracy_callable_true,
+            gradient_callable=api.gradient_callable,
+        )
+
+    # ------------------------------------------------------------------ #
+    # MLP / LLM backends
+    # ------------------------------------------------------------------ #
     measured = maybe_measured_tau_a()
     if measured is not None:
         tau, a = measured
-    elif is_resnet_backend():
-        # Use real activation sizes from a calibration pass.
-        # measured_a() returns {link_idx: bytes_per_sample}; we build
-        # tau as equal tiny values (compute is local, not modelled here).
-        num_links = api.num_links
-        eta_min0 = float(os.environ.get("ETA_MIN0", "0.125"))
-        eta_min1 = float(os.environ.get("ETA_MIN1", "0.125"))
-        raw_a = api.measured_a()           # {0: bytes, 1: bytes, 2: bytes}
-        tau   = {i: 0.001 for i in range(num_links + 1)}
-        a     = {i: float(raw_a[i]) for i in range(num_links)}
     else:
         tau = {0: 0.01, 1: 0.01, 2: 0.01}
         a = {0: 10.0, 1: 20.0}
 
-    r_k = float(os.environ.get("R_K", os.environ.get("MEASURED_R_K", "10.0")))
-
-    # Derive topology from tau/a — works for 2 links (MLP/LLM) or 3 links (ResNet)
-    num_links  = len(a)                          # number of transfer links
-    num_nodes  = len(tau)                        # = num_links + 1
-    eta_min_vals = [eta_min0] + [eta_min1] * (num_links - 1)
-    eta_min_dict = {i: eta_min_vals[min(i, len(eta_min_vals) - 1)] for i in range(num_links)}
-
     return InferenceTask(
         task_id=task_id,
-        b_k=0,
-        L_k=num_nodes,
+        b_k=0,       # task starts at node 0
+        L_k=3,       # 3 nodes (0,1,2) -> 2 links (0,1)
         tau=tau,
         a=a,
-        eta_min=eta_min_dict,
+        eta_min={0: eta_min0, 1: eta_min1},
         R_k_callable=lambda t, r=r_k: r,
-        w_k=w_k,
+        w_k=w_k,                            # weight in multi-task objective
         accuracy_callable=api.accuracy_callable,
         accuracy_callable_true=api.accuracy_callable_true,
         gradient_callable=api.gradient_callable,
     )
-
-
-def _feasible_c(tasks, scale: float = 4.0) -> np.ndarray:
-    """
-    Compute a channel vector that is guaranteed feasible for all given tasks.
-
-    For each link i, the minimum single-task feasibility requirement is:
-        c_i >= a[i] * eta_min[i] * R_k          (Lemma 3.1 / 3.3)
-
-    With K tasks sharing the link, the multi-task condition requires the sum
-    of per-task minimum bandwidth fractions to be <= 1, so effectively:
-        c_i >= K * a[i] * eta_min[i] * R_k
-
-    We multiply by `scale` (default 4x) to give the optimizer meaningful
-    headroom above the feasibility boundary, so it actually has compression
-    choices to make rather than just satisfying the minimum.
-
-    This makes all demos self-calibrating: the same code works for the toy
-    MLP (a ~ 10-20 bytes) and ResNet (a ~ tens of thousands of bytes).
-    """
-    K = len(tasks)
-    task0 = tasks[0]
-    R_k = task0.get_R_k(0)
-    num_links = task0.L_k - 1
-    c = np.zeros(num_links)
-    for i in range(num_links):
-        link_i = task0.b_k + i
-        c[i] = scale * K * task0.a[link_i] * task0.eta_min[link_i] * R_k
-    return c
 
 
 # ---------------------------------------------------------------------------
@@ -304,12 +266,10 @@ def demo_csi_aware_single_task(api):
     print("  eta_i* = min(1, c_i / (R * a_i))")
 
     task = make_task(task_id=1, api=api)
-    M = task.L_k
-    num_links = task.L_k - 1
-    optimizer = CSIAwareSingleTaskOptimizer(M=M, tasks=[task])
+    optimizer = CSIAwareSingleTaskOptimizer(M=3, tasks=[task])
 
-    # Channel set to 4x the minimum feasible value — works for any backend
-    c_t = _feasible_c([task], scale=4.0)
+    # Feasible: high capacity -> optimizer can allocate up to 1.0
+    c_t = np.array([30.0, 100.0])
     res = optimizer.optimize(t=0, c_t=c_t)
 
     if res is None:
@@ -342,12 +302,10 @@ def demo_csi_aware_multi_task(api):
 
     task1 = make_task(task_id=1, api=api, w_k=1.0)
     task2 = make_task(task_id=2, api=api, w_k=1.0)
-    M = task1.L_k
-    num_links = task1.L_k - 1
-    optimizer = CSIAwareMultiTaskOptimizer(M=M, tasks=[task1, task2])
+    optimizer = CSIAwareMultiTaskOptimizer(M=3, tasks=[task1, task2])
 
-    # Channel set to 4x the two-task minimum feasible value
-    c_t = _feasible_c([task1, task2], scale=4.0)
+    # Feasible capacity for two tasks
+    c_t = np.array([80.0, 80.0])
     res = optimizer.optimize(t=0, c_t=c_t)
 
     if res is None:
@@ -362,9 +320,9 @@ def demo_csi_aware_multi_task(api):
         print(f"  Task {tid}: eta = {eta}, s_comm = {s_comm}, s_comp = {s_comp}, A = {acc:.4f}")
 
     # Verify link capacity: sum of s_comm on each link <= 1
-    for link_i in range(num_links):
-        total = res[1]["s_comm"][link_i] + res[2]["s_comm"][link_i]
-        print(f"  Link {link_i} utilization: {total:.4f} (must be <= 1.0)")
+    total_link0 = res[1]["s_comm"][0] + res[2]["s_comm"][0]
+    total_link1 = res[1]["s_comm"][1] + res[2]["s_comm"][1]
+    print(f"  Link utilization: [{total_link0:.4f}, {total_link1:.4f}] (must be <= 1.0)")
 
 
 # ---------------------------------------------------------------------------
@@ -383,11 +341,9 @@ def demo_no_csi_single_task(api):
     print("  update_dual(t, actual_delays) adjusts lambda from real delays")
 
     task = make_task(task_id=1, api=api)
-    M = task.L_k
-    num_links = task.L_k - 1
-    optimizer = NoCSISingleTaskOptimizer(M=M, tasks=[task], mu=1.0, epsilon=0.1)
+    optimizer = NoCSISingleTaskOptimizer(M=3, tasks=[task], mu=1.0, epsilon=0.1)
 
-    c_hat = _feasible_c([task], scale=4.0)
+    c_hat = np.array([50.0, 50.0])
 
     # Empty queue -> maximize accuracy (eta -> 1)
     optimizer.lambda_t = 0.0
@@ -424,11 +380,9 @@ def demo_no_csi_multi_task(api):
 
     task1 = make_task(task_id=1, api=api, w_k=1.0)
     task2 = make_task(task_id=2, api=api, w_k=1.0)
-    M = task1.L_k
-    num_links = task1.L_k - 1
-    optimizer = NoCSIMultiTaskOptimizer(M=M, tasks=[task1, task2], mu=1.0, epsilon=0.1, J=10)
+    optimizer = NoCSIMultiTaskOptimizer(M=3, tasks=[task1, task2], mu=1.0, epsilon=0.1, J=10)
 
-    c_hat = _feasible_c([task1, task2], scale=4.0)
+    c_hat = np.array([50.0, 50.0])
 
     # Symmetric queues
     res = optimizer.optimize(t=0, c_hat=c_hat)
@@ -462,24 +416,21 @@ def demo_single_task_baselines(api):
     print("  Grouped exactly like compare_to_baselines.py")
 
     task = make_task(task_id=1, api=api)
-    M = task.L_k
-    num_links = task.L_k - 1
-    c_t   = _feasible_c([task], scale=4.0)
-    c_hat = _feasible_c([task], scale=2.0)   # tighter estimate for No-CSI baselines
+    c_t = np.array([50.0, 70.0])
 
     print("\n  CSI-aware baselines (instantiate -> set c_t -> optimize):")
 
-    max_comp = MaxCompressionSingleTaskBaseline(M=M, tasks=[task])
+    max_comp = MaxCompressionSingleTaskBaseline(M=3, tasks=[task])
     res = max_comp.optimize(t=0, c_t=c_t)
     eta = res[1]["eta"]
     print(f"    Baseline: max compression -> eta = {eta}, A = {task.A_k_true(eta):.4f}")
 
-    no_comp = NoCompressionSingleTaskBaseline(M=M, tasks=[task])
+    no_comp = NoCompressionSingleTaskBaseline(M=3, tasks=[task])
     res = no_comp.optimize(t=0, c_t=c_t)
     eta = res[1]["eta"]
     print(f"    Baseline: no compression  -> eta = {eta}, A = {task.A_k_true(eta):.4f}")
 
-    uniform_comp = UniformCompressionSingleTaskBaseline(M=M, tasks=[task])
+    uniform_comp = UniformCompressionSingleTaskBaseline(M=3, tasks=[task])
     res = uniform_comp.optimize(t=0, c_t=c_t)
     eta = res[1]["eta"]
     print(f"    Baseline: uniform comp.  -> eta = {eta}, A = {task.A_k_true(eta):.4f}")
@@ -488,28 +439,28 @@ def demo_single_task_baselines(api):
     print("    Note: single-task No-CSI baselines are estimator-based; they do not use dual queues.")
 
     # Myopic
-    myopic_est = LastObservationEstimator(num_links=num_links, warmup_value=c_hat[0])
+    myopic_est = LastObservationEstimator(num_links=2, warmup_value=40.0)
     myopic_est.update(c_t)
     c_hat_myopic = myopic_est.estimate(1)
-    myopic = MyopicSingleTaskBaseline(M=M, tasks=[task])
+    myopic = MyopicSingleTaskBaseline(M=3, tasks=[task])
     res = myopic.optimize(t=1, c_hat=c_hat_myopic)
     eta = res[1]["eta"]
     print(f"    No-CSI Baseline: myopic        c_hat={c_hat_myopic} -> eta = {eta}")
 
     # Conservative
-    cons_est = RunningMinEstimator(num_links=num_links, warmup_value=c_hat[0])
+    cons_est = RunningMinEstimator(num_links=2, warmup_value=40.0)
     cons_est.update(c_t)
     c_hat_cons = cons_est.estimate(1)
-    conservative = ConservativeSingleTaskBaseline(M=M, tasks=[task])
+    conservative = ConservativeSingleTaskBaseline(M=3, tasks=[task])
     res = conservative.optimize(t=1, c_hat=c_hat_cons)
     eta = res[1]["eta"]
     print(f"    No-CSI Baseline: conservative  c_hat={c_hat_cons} -> eta = {eta}")
 
     # Moving average
-    ma_est = MovingAverageEstimator(num_links=num_links, window=5, warmup_value=c_hat[0])
+    ma_est = MovingAverageEstimator(num_links=2, window=5, warmup_value=40.0)
     ma_est.update(c_t)
     c_hat_ma = ma_est.estimate(1)
-    moving_avg = MovingAverageSingleTaskBaseline(M=M, tasks=[task])
+    moving_avg = MovingAverageSingleTaskBaseline(M=3, tasks=[task])
     res = moving_avg.optimize(t=1, c_hat=c_hat_ma)
     eta = res[1]["eta"]
     print(f"    No-CSI Baseline: moving avg    c_hat={c_hat_ma} -> eta = {eta}")
@@ -528,37 +479,35 @@ def demo_multi_task_baselines(api):
     task1 = make_task(task_id=1, api=api, w_k=1.0)
     task2 = make_task(task_id=2, api=api, w_k=2.0)
     tasks = [task1, task2]
-    M = task1.L_k
-    num_links = task1.L_k - 1
-    c_t   = _feasible_c(tasks, scale=4.0)
-    c_hat = _feasible_c(tasks, scale=2.0)   # tighter No-CSI estimate
+    c_t = np.array([80.0, 80.0])
+    c_hat = np.array([70.0, 65.0])
 
     print("\n  CSI-aware baselines (instantiate -> set c_t -> optimize):")
 
-    max_comp = MaxCompressionMultiTaskBaseline(M=M, tasks=tasks)
+    max_comp = MaxCompressionMultiTaskBaseline(M=3, tasks=tasks)
     res = max_comp.optimize(t=0, c_t=c_t)
     print(f"    Baseline: max compression -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
-    no_comp = NoCompressionMultiTaskBaseline(M=M, tasks=tasks)
+    no_comp = NoCompressionMultiTaskBaseline(M=3, tasks=tasks)
     res = no_comp.optimize(t=0, c_t=c_t)
     print(f"    Baseline: no compression  -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
-    equal_share = StaticEqualShareMultiTaskBaseline(M=M, tasks=tasks)
+    equal_share = StaticEqualShareMultiTaskBaseline(M=3, tasks=tasks)
     res = equal_share.optimize(t=0, c_t=c_t)
     print(f"    Baseline: equal-share     -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
-    proportional = ProportionalResourceAllocationMultiTaskBaseline(M=M, tasks=tasks)
+    proportional = ProportionalResourceAllocationMultiTaskBaseline(M=3, tasks=tasks)
     res = proportional.optimize(t=0, c_t=c_t)
     print(f"    Baseline: proportional    -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
-    strict_priority = StrictPriorityGreedyMultiTaskBaseline(M=M, tasks=tasks)
+    strict_priority = StrictPriorityGreedyMultiTaskBaseline(M=3, tasks=tasks)
     res = strict_priority.optimize(t=0, c_t=c_t)
     print(f"    Baseline: strict priority -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
     print("\n  No-CSI baselines (instantiate -> set c_hat -> optimize -> update_dual):")
 
     decoupled = DecoupledEqualSplitStochasticDescentMultiTaskBaseline(
-        M=M, tasks=tasks, mu=1.0, epsilon=0.1
+        M=3, tasks=tasks, mu=1.0, epsilon=0.1
     )
     res = decoupled.optimize(t=0, c_hat=c_hat)
     print(f"    No-CSI Baseline: decoupled equal-split -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
@@ -568,7 +517,7 @@ def demo_multi_task_baselines(api):
     print(f"      re-optimize(t=1): Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
     queue_prop = QueueProportionalHeuristicMultiTaskBaseline(
-        M=M, tasks=tasks, mu=1.0, epsilon=0.1
+        M=3, tasks=tasks, mu=1.0, epsilon=0.1
     )
     res = queue_prop.optimize(t=0, c_hat=c_hat)
     print(f"    No-CSI Baseline: queue-proportional   -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
@@ -577,18 +526,15 @@ def demo_multi_task_baselines(api):
     res = queue_prop.optimize(t=1, c_hat=c_hat)
     print(f"      re-optimize(t=1): Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}")
 
-    hist_mean = MeanEstimator(num_links=num_links, warmup_value=c_hat[0], warmup=3)
+    hist_mean = MeanEstimator(num_links=2, warmup_value=40.0, warmup=3)
     hist_mean.update(c_t)
     moving_average_c_hat = hist_mean.estimate(1)
-    certainty_eq = HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(M=M, tasks=tasks)
+    certainty_eq = HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(M=3, tasks=tasks)
     res = certainty_eq.optimize(t=1, c_hat=moving_average_c_hat)
-    if res is None:
-        print("    No-CSI Baseline: moving average (certainty equivalence) -> Infeasible")
-    else:
-        print(
-            "    No-CSI Baseline: moving average (certainty equivalence)"
-            f" -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}"
-        )
+    print(
+        "    No-CSI Baseline: moving average (certainty equivalence)"
+        f" -> Task1 eta={res[1]['eta']}, Task2 eta={res[2]['eta']}"
+    )
     print("      note: this baseline does not maintain dual queues (no update_dual).")
 
 

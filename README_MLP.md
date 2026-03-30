@@ -33,8 +33,24 @@ Three compressors are available, selected by environment variable:
 ```bash
 export COMPRESSOR_TYPE=topk           # Top-K sparsification (default)
 export COMPRESSOR_TYPE=quantization   # Uniform quantization (FP16/INT8/INT4/INT2)
-export COMPRESSOR_TYPE=llmint8        # LLM.int8() hybrid mixed-precision
+export COMPRESSOR_TYPE=llmint8        # LLM.int8() hybrid mixed-precision (not supported for MLP)
 python main.py
+```
+
+Use `COMPRESSOR_BACKEND` to select whether the CPU or GPU-native implementation
+is used. The GPU-native path keeps all compression operations on the GPU,
+avoiding PCIe round-trips:
+
+```bash
+export COMPRESSOR_BACKEND=cpu   # compressors.py — CPU round-trip (default)
+export COMPRESSOR_BACKEND=gpu   # gpu_compressors.py — GPU-native, no CPU transfer
+```
+
+A clear banner is printed at startup showing which compressor and backend are active:
+
+```
+[MLP backend] compressor=TopK                 backend=cpu  path=CPU (compress→cpu→decompress→device)
+[MLP backend] compressor=GPUTopK              backend=gpu  path=GPU-native (no CPU round-trip)
 ```
 
 When `compressors.py` is not present, the backend silently falls back to a
@@ -102,7 +118,8 @@ python run_param_sweep.py --T 200 --seed 42 --out_dir outputs/my_sweep
 
 | Variable | Role | Default |
 |----------|------|---------|
-| `COMPRESSOR_TYPE` | topk / quantization / llmint8 | `topk` |
+| `COMPRESSOR_TYPE` | topk / quantization (llmint8 not supported for MLP) | `topk` |
+| `COMPRESSOR_BACKEND` | `cpu` (compressors.py) / `gpu` (gpu_compressors.py) | `cpu` |
 | `ETA_MIN0` | η floor on link 0 | `0.1` |
 | `ETA_MIN1` | η floor on link 1 | `0.05` |
 | `R_K` | Target throughput R_k(t) | `10.0` |

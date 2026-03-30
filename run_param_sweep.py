@@ -838,6 +838,7 @@ def main() -> None:
     print("  Environment variables:", flush=True)
     _ENV_VARS = [
         "INFERENCE_OPTIMIZER_BACKEND",
+        "COMPRESSOR_BACKEND",
         "RESNET_CHECKPOINT",
         "RESNET_DATA_ROOT",
         "RESNET_CUTPOINTS",

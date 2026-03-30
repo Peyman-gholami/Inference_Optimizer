@@ -87,6 +87,15 @@ except ImportError as _e:
     _DEPS_OK = False
     _IMPORT_ERROR = str(_e)
 
+# Central compressor registry — reads COMPRESSOR_BACKEND once at import time.
+from compressor_registry import (
+    get_compressor      as _registry_get_compressor,
+    is_gpu_compressor   as _is_gpu_compressor,
+    is_gpu_backend      as _is_gpu_backend,
+    describe_compressor as _describe_compressor,
+    COMPRESSOR_BACKEND  as _COMPRESSOR_BACKEND,
+)
+
 from toy_A import grad_oracle
 
 
@@ -132,7 +141,7 @@ def _load_resnet56(checkpoint_path: str, device: torch.device) -> nn.Module:
             f"resnet20.py or compressors.py not found: {_IMPORT_ERROR}"
         )
     model = resnet20.resnet56()
-    ckpt  = torch.load(checkpoint_path, map_location=device)
+    ckpt  = torch.load(checkpoint_path, map_location=device, weights_only=False)
     sd    = ckpt['state_dict'] if isinstance(ckpt, dict) and 'state_dict' in ckpt else ckpt
     model.load_state_dict(_normalize_state_dict(sd))
     model.to(device).eval()
@@ -229,13 +238,17 @@ def _run_partitioned(
             # Compress the activation between this partition and the next
             if idx < len(partitions) - 1:
                 eta = float(eta_vec[idx])
-                tensor_cpu = x.detach().cpu()
-                original_bytes = int(tensor_cpu.numel() * tensor_cpu.element_size())
+                # Clamp eta to [0, 1] — the Stein oracle perturbs eta with
+                # x ± sigma*z which can push it outside this range.
+                # LLMInt8 uses eta as an outlier_ratio passed to quantile()
+                # which requires its argument in [0, 1]; TopK/Quant also
+                # behave correctly only within this range.
+                eta = max(0.0, min(1.0, eta))
+                original_bytes = int(x.detach().numel() * x.element_size())
 
                 if eta >= 1.0:
                     # No compression — pass through
                     compressed_bytes = original_bytes
-                    restored = tensor_cpu
                 else:
                     # Build compressor params: TopK/Quant take float, LLMInt8 takes list
                     name = compressor.get_name().lower()
@@ -244,13 +257,25 @@ def _run_partitioned(
                     else:
                         params = eta
 
-                    compressed = compressor.compress(tensor_cpu, params)
-                    compressed_bytes = int(
-                        compressor.get_compressed_size(compressed)
-                        if hasattr(compressor, 'get_compressed_size')
-                        else compressed.get('compressed_bytes', original_bytes)
-                    )
-                    restored = compressor.decompress(compressed, device='cpu')
+                    if _is_gpu_compressor(compressor):
+                        # GPU-native path — tensor stays on device throughout
+                        compressed = compressor.compress(x.detach(), params)
+                        compressed_bytes = int(
+                            compressor.get_compressed_size(compressed)
+                            if hasattr(compressor, 'get_compressed_size')
+                            else original_bytes
+                        )
+                        x = compressor.decompress(compressed, device=device)
+                    else:
+                        # CPU path — original behaviour
+                        tensor_cpu = x.detach().cpu()
+                        compressed = compressor.compress(tensor_cpu, params)
+                        compressed_bytes = int(
+                            compressor.get_compressed_size(compressed)
+                            if hasattr(compressor, 'get_compressed_size')
+                            else compressed.get('compressed_bytes', original_bytes)
+                        )
+                        x = compressor.decompress(compressed, device='cpu').to(device)
 
                 payload_ratio = min(1.0, compressed_bytes / original_bytes) if original_bytes > 0 else 1.0
                 transfer_stats.append({
@@ -258,7 +283,6 @@ def _run_partitioned(
                     'compressed_bytes': compressed_bytes,
                     'payload_ratio':    payload_ratio,
                 })
-                x = restored.to(device)
 
     return x, transfer_stats
 
@@ -323,14 +347,18 @@ class ResNetTaskCallables:
         self.N           = N
         self.device      = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Resolve compressor
+        # Resolve compressor via registry — respects COMPRESSOR_BACKEND
         if isinstance(compressor, str):
-            self.compressor = get_compressor(compressor)
+            self.compressor = _registry_get_compressor(compressor)
         else:
             self.compressor = compressor
 
-        print(f"[ResNet backend] device={self.device}  compressor={self.compressor.get_name()}")
-        print(f"[ResNet backend] cutpoints={self.cutpoints}  ({len(self.cutpoints)} links, {len(self.cutpoints)+1} partitions)")
+        # ── Clear printout ─────────────────────────────────────────────────
+        print(f"[ResNet backend] device={self.device}", flush=True)
+        print(_describe_compressor(self.compressor, 'ResNet backend'), flush=True)
+        print(f"[ResNet backend] cutpoints={self.cutpoints}  "
+              f"({len(self.cutpoints)} links, {len(self.cutpoints)+1} partitions)",
+              flush=True)
 
         # Load model and build partitions
         self._model = _load_resnet56(checkpoint_path, self.device)

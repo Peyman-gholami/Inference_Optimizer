@@ -44,15 +44,30 @@ python run_param_sweep.py --baseline_algorithms none --experiments sigma
 ## Compressor selection
 
 The ResNet backend supports all three compressors from `compressors.py`.
-Compression happens **once per batch at each partition boundary** — exactly
-the scenario these compressors were designed for — so the CPU round-trip
-cost is negligible.
+Compression happens **once per batch at each partition boundary**.
 
 ```bash
 export COMPRESSOR_TYPE=topk           # Top-K sparsification + PackBits mask (default)
 export COMPRESSOR_TYPE=quantization   # Uniform quantization: FP16/INT8/INT4/INT2
 export COMPRESSOR_TYPE=llmint8        # Hybrid mixed-precision: outliers at FP16/INT8,
                                       # regular values at INT8/INT4/INT2
+```
+
+Use `COMPRESSOR_BACKEND` to select whether the CPU or GPU-native implementation
+is used. The GPU-native path (`gpu_compressors.py`) keeps all compression
+operations on the GPU, eliminating PCIe round-trips between partitions:
+
+```bash
+export COMPRESSOR_BACKEND=cpu   # compressors.py — CPU round-trip (default)
+export COMPRESSOR_BACKEND=gpu   # gpu_compressors.py — GPU-native, no CPU transfer
+```
+
+A clear banner is printed at startup showing which compressor and backend are active:
+
+```
+[ResNet backend] device=cuda
+[ResNet backend] compressor=LLMInt8              backend=cpu  path=CPU (compress→cpu→decompress→device)
+[ResNet backend] compressor=GPULLMInt8           backend=gpu  path=GPU-native (no CPU round-trip)
 ```
 
 For `quantization`, the bit-width is selected by the η value at each link:
@@ -150,6 +165,7 @@ rather than toy values. Typical uncompressed sizes at the default cutpoints:
 | `RESNET_FAST_BATCHES` | Batches used by fast eval | `2` |
 | `RESNET_DOWNLOAD` | Auto-download CIFAR-10 | `1` |
 | `COMPRESSOR_TYPE` | `topk` / `quantization` / `llmint8` | `topk` |
+| `COMPRESSOR_BACKEND` | `cpu` (compressors.py) / `gpu` (gpu_compressors.py) | `cpu` |
 | `RESNET_GRAD_SIGMA` | Stein smoothing σ | `0.05` |
 | `RESNET_GRAD_N` | Stein sample pairs N | `20` |
 | `ETA_MIN0` | η floor on first link | `0.125` |

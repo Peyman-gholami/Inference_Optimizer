@@ -119,8 +119,8 @@ def main() -> None:
     print(f"  c_min/max  = {args.c_min} / {args.c_max}", flush=True)
     print(f"  out_dir    = {args.out_dir}", flush=True)
     _ENV_VARS = [
-        "INFERENCE_OPTIMIZER_BACKEND", "RESNET_CHECKPOINT",
-        "RESNET_CUTPOINTS", "RESNET_FAST_BATCHES",
+        "INFERENCE_OPTIMIZER_BACKEND", "COMPRESSOR_BACKEND",
+        "RESNET_CHECKPOINT", "RESNET_CUTPOINTS", "RESNET_FAST_BATCHES",
         "COMPRESSOR_TYPE", "ETA_MIN0", "ETA_MIN1", "R_K",
     ]
     print("  Env vars:", flush=True)

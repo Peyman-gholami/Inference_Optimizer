@@ -22,6 +22,17 @@ except ImportError:
     _COMPRESSORS_AVAILABLE = False
     BaseCompressor = object          # dummy so type hints don't crash
 
+# Central compressor registry — reads COMPRESSOR_BACKEND once at import time.
+# Provides get_compressor(), is_gpu_compressor(), is_gpu_backend(),
+# describe_compressor(), and the COMPRESSOR_BACKEND constant.
+from compressor_registry import (
+    get_compressor      as _registry_get_compressor,
+    is_gpu_compressor   as _is_gpu_compressor,
+    is_gpu_backend      as _is_gpu_backend,
+    describe_compressor as _describe_compressor,
+    COMPRESSOR_BACKEND  as _COMPRESSOR_BACKEND,
+)
+
 
 # ─────────────────────────────────────────────
 # 1.  Compressor helpers
@@ -29,22 +40,28 @@ except ImportError:
 
 def _make_compressor(compressor):
     """
-    Resolve *compressor* to a BaseCompressor instance.
+    Resolve *compressor* to a compressor instance, respecting COMPRESSOR_BACKEND.
 
-    Accepted values
-    ---------------
-    None / 'topk'           -> TopKCompressor  (default, original behaviour)
+    COMPRESSOR_BACKEND=cpu (default)  ->  compressors.py  (CPU round-trip)
+    COMPRESSOR_BACKEND=gpu            ->  gpu_compressors.py  (GPU-native)
+
+    Accepted values for *compressor*
+    ---------------------------------
+    None / 'topk'           -> TopKCompressor  (default)
     'quantization'          -> QuantizationCompressor
-    BaseCompressor instance -> used as-is
+    BaseCompressor instance -> used as-is (CPU path)
+    GPUBaseCompressor inst. -> used as-is (GPU path)
 
-    LLMInt8 is intentionally excluded.  Its row-wise AbsMax scaling assumes
-    a transformer [batch, seq_len, hidden_dim] layout.  MLP activations are
-    1-D vectors after each ReLU — a fundamentally different shape — so
-    LLMInt8 does not apply here and is rejected with a clear message.
+    LLMInt8 is intentionally excluded for the MLP backend.  Its row-wise
+    AbsMax scaling assumes a transformer [batch, seq_len, hidden_dim] layout.
+    MLP activations are 1-D vectors after each ReLU — a fundamentally
+    different shape — so LLMInt8 does not apply here.
     """
-    if not _COMPRESSORS_AVAILABLE:
-        # compressors.py not available — silently use the built-in fallback
-        return _BuiltinTopKCompressor()
+    if not _COMPRESSORS_AVAILABLE and _COMPRESSOR_BACKEND == 'cpu':
+        instance = _BuiltinTopKCompressor()
+        print(_describe_compressor(instance, 'MLP backend') +
+              '  (fallback — compressors.py not found)', flush=True)
+        return instance
 
     if isinstance(compressor, str):
         name = compressor.strip().lower()
@@ -54,15 +71,14 @@ def _make_compressor(compressor):
                 f"Choose from: topk, quantization.  "
                 f"(LLMInt8 is designed for transformer hidden states, not MLP activations.)"
             )
-        if name == 'topk':
-            return TopKCompressor()
-        return _get_compressor(compressor)
+        instance = _registry_get_compressor(name)
+    elif compressor is None:
+        instance = _registry_get_compressor('topk')
+    else:
+        instance = compressor
 
-    if compressor is None:
-        return TopKCompressor()
-
-    # Already a BaseCompressor instance — used as-is
-    return compressor
+    print(_describe_compressor(instance, 'MLP backend'), flush=True)
+    return instance
 
 
 class _BuiltinTopKCompressor:
@@ -96,30 +112,47 @@ def _compress_decompress(compressor, x: torch.Tensor, eta: float) -> torch.Tenso
     Round-trip a tensor through compress/decompress using *eta* as the
     compression parameter.  Returns a tensor on the same device as *x*.
 
-    For TopKCompressor  : eta is the keep-fraction (k_ratio).
-    For QuantizationCompressor: eta is mapped to the nearest supported
-        bit-width level (0.5->FP16, 0.25->INT8, 0.125->INT4, 0.0625->INT2).
-    For LLMInt8Compressor: eta is used as the outlier ratio, with FP16
-        outliers and INT8 regular values as defaults.
+    For TopKCompressor / GPUTopKCompressor:
+        eta is the keep-fraction (k_ratio).
+    For QuantizationCompressor / GPUQuantizationCompressor:
+        eta is mapped to the nearest supported bit-width level
+        (0.5->FP16, 0.25->INT8, 0.125->INT4, 0.0625->INT2).
+    For LLMInt8Compressor / GPULLMInt8Compressor:
+        eta is used as the outlier ratio, with FP16 outliers and INT8
+        regular values as defaults.
+
+    GPU-native compressors (GPUBaseCompressor subclasses) operate entirely
+    on the input tensor's device — no .cpu() transfer is performed.
+    CPU compressors (BaseCompressor subclasses) use the original CPU
+    round-trip path.
     """
+    # Clamp eta to [0, 1] — the Stein oracle perturbs eta with x ± sigma*z
+    # which can push it outside this range. LLMInt8 uses eta as an
+    # outlier_ratio passed to torch.quantile() which requires [0, 1].
+    eta = max(0.0, min(1.0, eta))
+
     if eta >= 1.0:
         return x                              # no compression needed
 
     device = x.device
-    tensor_cpu = x.detach().cpu()
 
     # Build compression_params depending on compressor type
     name = compressor.get_name().lower() if hasattr(compressor, 'get_name') else ''
     if 'llmint8' in name or 'llm' in name:
-        # eta is the outlier fraction; use sensible precision defaults
         params = [eta, 'fp16', 'int8']
     else:
-        # TopK and Quantization both accept a plain float
         params = eta
 
-    compressed = compressor.compress(tensor_cpu, params)
-    restored = compressor.decompress(compressed, device='cpu')
-    return restored.to(device)
+    if _is_gpu_compressor(compressor):
+        # GPU-native path — tensor stays on device throughout
+        compressed = compressor.compress(x.detach(), params)
+        return compressor.decompress(compressed, device=device)
+    else:
+        # CPU path — original behaviour
+        tensor_cpu = x.detach().cpu()
+        compressed = compressor.compress(tensor_cpu, params)
+        restored   = compressor.decompress(compressed, device='cpu')
+        return restored.to(device)
 
 
 # ─────────────────────────────────────────────
