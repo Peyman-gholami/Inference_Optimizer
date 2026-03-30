@@ -1,0 +1,72 @@
+#!/bin/bash
+# =============================================================================
+# launch_resnet_N_sweep.sh  —  Submit the full sweep pipeline to Slurm
+# =============================================================================
+#
+# Submits:
+#   1. Job array for N sweep     (4 tasks, one per N value)
+#   2. Plot job for N sweep      (runs after all N tasks complete)
+#
+# Usage
+# -----
+#   bash launch_resnet_N_sweep.sh
+#
+# =============================================================================
+
+# =============================================================================
+# CONFIG — edit to match your environment
+# =============================================================================
+HOME_DIR=..
+OUT_DIR=${HOME_DIR}/outputs/resnet_sweep/llmint8 # valid values topk (default), quantization, llmint8
+SIGMA_SWEEP_DIR=$OUT_DIR/exp1_sigma_sweep
+N_SWEEP_DIR=$OUT_DIR/exp2_N_sweep
+PARTITION=gpu
+GRES=gpu:h200:1
+MEM=16G
+TIME_SWEEP=4:00:00      # time limit per sweep value
+TIME_PLOT=0:30:00       # time limit for plot job (CPU only)
+
+mkdir -p logs
+
+
+# =============================================================================
+# 1. Submit N sweep array (indices 0-3 for 4 N values)
+# =============================================================================
+N_JOB=$(sbatch \
+    --partition=$PARTITION \
+    --gres=$GRES \
+    --mem=$MEM \
+    --time=$TIME_SWEEP \
+    --array=0-3 \
+    --job-name=N_sweep \
+    --output=logs/N_%A_%a.out \
+    --error=logs/N_%A_%a.err \
+    --parsable \
+    submit_resnet_sweep.sh N)
+
+echo "Submitted N sweep array:     job ID $N_JOB"
+
+# =============================================================================
+# 2. Submit N plot job (depends on all N array tasks completing)
+# =============================================================================
+N_PLOT_JOB=$(sbatch \
+    --partition=short \
+    --mem=4G \
+    --time=$TIME_PLOT \
+    --job-name=N_plot \
+    --output=logs/N_plot_%j.out \
+    --error=logs/N_plot_%j.err \
+    --dependency=afterok:$N_JOB \
+    --parsable \
+    --wrap="python -u ${HOME_DIR}/plot_sweep_summary.py \
+        --experiment N \
+        --sweep_dir  $N_SWEEP_DIR \
+        --out_dir    $N_SWEEP_DIR/summary")
+
+echo "Submitted N plot job:        job ID $N_PLOT_JOB (depends on $N_JOB)"
+
+echo ""
+echo "Pipeline submitted. Monitor with: squeue -u \$USER"
+echo "Output directories:"
+echo "  N results     : $N_SWEEP_DIR"
+echo "  N plots       : $N_SWEEP_DIR/summary"
