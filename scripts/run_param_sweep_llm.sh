@@ -55,7 +55,7 @@ EPSILON=0.1
 FIXED_N=3               # N used during sigma sweep (LLM: 3 is the default)
 FIXED_SIGMA=0.05        # sigma used during N sweep
 HOME_DIR=..
-OUT_DIR=${HOME_DIR}/outputs/llm_sweep/${LLM_ACTIVATION_STRATEGY}
+OUT_DIR=${HOME_DIR}/outputs/llm_param_sweep/${LLM_ACTIVATION_STRATEGY}
 BASELINE_ALGORITHMS=none
 
 # Sweep values

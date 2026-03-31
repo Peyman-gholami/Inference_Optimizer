@@ -94,17 +94,20 @@ def setup_model_and_callables():
     device = torch.device("cpu")
 
     # Data loaders
+    mnist_data_root = os.environ.get("MNIST_DATA_ROOT", "./data")
+    print(f"[MLP backend] MNIST data root: {mnist_data_root}", flush=True)
+
     tf = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
     train_loader = DataLoader(
-        datasets.MNIST("./data", train=True, download=True, transform=tf),
+        datasets.MNIST(mnist_data_root, train=True, download=True, transform=tf),
         batch_size=128,
         shuffle=True,
     )
     test_loader = DataLoader(
-        datasets.MNIST("./data", train=False, download=True, transform=tf),
+        datasets.MNIST(mnist_data_root, train=False, download=True, transform=tf),
         batch_size=256,
         shuffle=False,
     )

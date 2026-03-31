@@ -114,17 +114,20 @@ def setup_model_and_callables_patched(sigma: float = 0.05, N: int = 50):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"  Using device: {device}")
 
+    mnist_data_root = os.environ.get("MNIST_DATA_ROOT", "./data")
+    print(f"  MNIST data root: {mnist_data_root}", flush=True)
+
     tf = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
     train_loader = DataLoader(
-        datasets.MNIST("./data", train=True, download=True, transform=tf),
+        datasets.MNIST(mnist_data_root, train=True, download=True, transform=tf),
         batch_size=128,
         shuffle=True,
     )
     test_loader = DataLoader(
-        datasets.MNIST("./data", train=False, download=True, transform=tf),
+        datasets.MNIST(mnist_data_root, train=False, download=True, transform=tf),
         batch_size=256,
         shuffle=False,
     )
@@ -846,6 +849,7 @@ def main() -> None:
         "RESNET_FAST_BATCHES",
         "RESNET_GRAD_SIGMA",
         "RESNET_GRAD_N",
+        "MNIST_DATA_ROOT",
         "COMPRESSOR_TYPE",
         "ETA_MIN0",
         "ETA_MIN1",

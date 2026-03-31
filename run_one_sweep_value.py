@@ -121,6 +121,7 @@ def main() -> None:
     _ENV_VARS = [
         "INFERENCE_OPTIMIZER_BACKEND", "COMPRESSOR_BACKEND",
         "RESNET_CHECKPOINT", "RESNET_CUTPOINTS", "RESNET_FAST_BATCHES",
+        "MNIST_DATA_ROOT",
         "COMPRESSOR_TYPE", "ETA_MIN0", "ETA_MIN1", "R_K",
     ]
     print("  Env vars:", flush=True)
