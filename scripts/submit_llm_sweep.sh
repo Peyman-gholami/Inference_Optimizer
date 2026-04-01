@@ -53,7 +53,7 @@ export COMPRESSOR_BACKEND=gpu       # cpu (compressors.py) | gpu (gpu_compressor
                                     # (GPU-native hooks) regardless of this setting.
                                     # COMPRESSOR_BACKEND applies only to MLP/ResNet
 export LLM_MODEL_NAME=unsloth/gemma-2b-it   # use unsloth mirror (no gated token needed)
-export LLM_ACTIVATION_STRATEGY=quantization
+export LLM_ACTIVATION_STRATEGY=quantization # topk_per_token | magnitude | random | quantization | llmint8
 export LLM_SPLIT_MODE=thirds
 export ETA_MIN0=0.25
 export ETA_MIN1=0.25

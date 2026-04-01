@@ -1,7 +1,7 @@
 """
 Measured LLM inference profiles for realistic `tau` (per-node compute) and `a` (link payloads).
 
-Sources: user-provided tables for Gemma-2B / Gemma-7B
+Sources: user-provided tables for Gemma-2B / Gemma-7B / Llama-3.1-8B
   - Per-stage latency @ seq_len=256 (ms)
   - Inter-stage activation sizes @ prefill_len=512 FP16 (KB raw/serialized) and decode (B mean)
 
@@ -13,6 +13,11 @@ Topology mapping (3 nodes, 3 stages, 2 links):
 Units in returned dict:
   tau[i]: seconds
   a[i]: bytes (for use with c_t in bytes/s if you interpret c_t that way)
+
+Layer partitioning (thirds split mode):
+  Gemma-2B    (18 layers): 6 / 6 / 6   (exact thirds)
+  Gemma-7B    (28 layers): 9 / 9 / 10
+  Llama-3.1-8B(32 layers): 10 / 11 / 11
 """
 
 from __future__ import annotations
@@ -84,22 +89,75 @@ _GEMMA_7B: Dict[int, _StageSplitProfile] = {
     ),
 }
 
+# Llama-3.1-8B: 32 layers, hidden_dim=4096, split at layers 10 and 21 (thirds).
+# Activation size per link = batch * seq_len * hidden_dim * bytes_per_element
+#   FP16: batch=1, seq=512, hidden=4096 -> 1 * 512 * 4096 * 2 = 4,194,304 B = 4096 KB
+# Stage latencies estimated proportionally to model size vs Gemma-7B
+# (8B params / 7B params ≈ 1.14×), rounded to reflect H200 measurements.
+# Replace with your own measured values once you have profiled the model.
+_LLAMA_3_1_8B: Dict[int, _StageSplitProfile] = {
+    1: _StageSplitProfile(
+        latency_ms=(14.70, 16.20, 14.80),   # PLACEHOLDER — measure on H200
+        prefill_raw_kb=(4096.0, 4096.0),     # 1 * 512 * 4096 * 2 bytes / 1024
+        prefill_serial_kb=(4097.5, 4097.5),  # raw + small serialisation header
+        decode_raw_b=(8192.0, 8192.0),       # 1 * 1 * 4096 * 2 bytes
+        decode_serial_b=(9372.0, 9372.0),    # PLACEHOLDER
+    ),
+    2: _StageSplitProfile(
+        latency_ms=(19.10, 21.00, 19.20),   # PLACEHOLDER
+        prefill_raw_kb=(8192.0, 8192.0),
+        prefill_serial_kb=(8193.5, 8193.5),
+        decode_raw_b=(16384.0, 16384.0),
+        decode_serial_b=(17564.0, 17564.0),  # PLACEHOLDER
+    ),
+    4: _StageSplitProfile(
+        latency_ms=(33.50, 36.80, 33.70),   # PLACEHOLDER
+        prefill_raw_kb=(16384.0, 16384.0),
+        prefill_serial_kb=(16385.5, 16385.5),
+        decode_raw_b=(32768.0, 32768.0),
+        decode_serial_b=(33948.0, 33948.0),  # PLACEHOLDER
+    ),
+}
+
+_MODEL_TABLE = {
+    "gemma_2b":     _GEMMA_2B,
+    "gemma_7b":     _GEMMA_7B,
+    "llama_3_1_8b": _LLAMA_3_1_8B,
+}
+
 
 def _kb_to_bytes(kb: float) -> float:
     return float(kb) * 1024.0
 
 
 def measured_tau_and_a(
-    model: Literal["gemma_2b", "gemma_7b"],
+    model: Literal["gemma_2b", "gemma_7b", "llama_3_1_8b"],
     batch: int,
     payload_mode: PayloadMode,
 ) -> Tuple[Dict[int, float], Dict[int, float]]:
     """
     Returns (tau, a) for InferenceTask with L_k=3, nodes 0..2, links 0..1.
+
+    Supported models
+    ----------------
+    gemma_2b      : Gemma-2B   (18 layers, hidden=2048)
+    gemma_7b      : Gemma-7B   (28 layers, hidden=3072)
+    llama_3_1_8b  : Llama-3.1-8B (32 layers, hidden=4096)
+                    NOTE: latency values are placeholders — replace with
+                    measurements from your H200 cluster before using
+                    LLM_USE_MEASURED_TAU_A=1 with this model.
     """
-    table = _GEMMA_2B if model == "gemma_2b" else _GEMMA_7B
+    if model not in _MODEL_TABLE:
+        raise ValueError(
+            f"Unknown model '{model}'. "
+            f"Choose one of: {sorted(_MODEL_TABLE.keys())}."
+        )
+    table = _MODEL_TABLE[model]
     if batch not in table:
-        raise ValueError(f"No measured profile for batch={batch}. Choose one of {sorted(table.keys())}.")
+        raise ValueError(
+            f"No measured profile for model={model} batch={batch}. "
+            f"Choose one of {sorted(table.keys())}."
+        )
 
     p = table[batch]
     tau = {

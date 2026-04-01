@@ -55,7 +55,7 @@ def _topk_mask_by_abs(flat_abs: torch.Tensor, k: int) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class ActivationCompressionConfig:
-    strategy: str  # magnitude | topk_per_token | random
+    strategy: str  # magnitude | topk_per_token | random | quantization | llmint8
     # Cut-points in "layer index" space where hooks are attached.
     layer_indices: Sequence[int]
     # Seed used to make random compression deterministic across eta evaluations.
@@ -68,6 +68,18 @@ class LLMActivationCompressor:
     sparsification controlled by `eta` (a vector, one eta per hooked layer).
 
     The compressor keeps hooks installed; only `eta` is updated in-place.
+
+    Strategies
+    ----------
+    magnitude        : top-k by absolute value, flat over the full tensor
+    topk_per_token   : top-k per token position along hidden_dim
+    random           : Bernoulli mask with deterministic seed
+    quantization     : symmetric uniform quantisation snapped to nearest bitwidth
+    llmint8          : GPU-native LLM.int8()-style mixed-precision via
+                       GPULLMInt8Compressor (gpu_compressors.py).
+                       eta is used as the outlier_ratio (top-eta fraction kept
+                       in FP16; remaining values quantised to INT8).
+                       Requires COMPRESSOR_BACKEND=gpu and gpu_compressors.py.
     """
 
     def __init__(
@@ -85,6 +97,25 @@ class LLMActivationCompressor:
 
         # Persist eta as floats for cheap .item()-free access in hooks.
         self._eta: List[float] = [1.0 for _ in range(self.d)]
+
+        # GPU-native LLMInt8 compressor — instantiated once and reused across
+        # all hook calls to avoid repeated object creation in the forward pass.
+        self._gpu_llmint8 = None
+        if config.strategy == "llmint8":
+            try:
+                from gpu_compressors import GPULLMInt8Compressor
+                self._gpu_llmint8 = GPULLMInt8Compressor()
+                print(
+                    "[LLMActivationCompressor] strategy=llmint8  "
+                    "backend=gpu  path=GPU-native (no CPU round-trip)",
+                    flush=True,
+                )
+            except ImportError:
+                raise ImportError(
+                    "LLM_ACTIVATION_STRATEGY=llmint8 requires gpu_compressors.py. "
+                    "Ensure gpu_compressors.py is on sys.path and "
+                    "COMPRESSOR_BACKEND=gpu is set."
+                )
 
         handles: List[torch.utils.hooks.RemovableHandle] = []
         for local_i, layer_idx in enumerate(config.layer_indices):
@@ -115,6 +146,22 @@ class LLMActivationCompressor:
             return hidden
         if eta <= 0.0:
             return torch.zeros_like(hidden)
+
+        if self.config.strategy == "llmint8":
+            # GPU-native LLM.int8()-style mixed-precision compression.
+            # eta is used as the outlier_ratio: top-eta fraction of elements
+            # are kept in FP16, the rest are quantised to INT8.
+            # The tensor stays on its device throughout — no CPU round-trip.
+            # Clamp eta to [0, 1] to satisfy GPULLMInt8Compressor's quantile range.
+            original_dtype = hidden.dtype
+            outlier_ratio = float(max(0.0, min(1.0, eta)))
+            params = [outlier_ratio, 'fp16', 'int8']
+            comp_data = self._gpu_llmint8.compress(hidden, params)
+            restored = self._gpu_llmint8.decompress(comp_data, device=hidden.device)
+            # GPULLMInt8Compressor dequantises to float32. Cast back to the
+            # model's working dtype (float16 for Gemma/Llama on GPU) so the
+            # next decoder layer receives the expected dtype.
+            return restored.to(original_dtype)
 
         if self.config.strategy == "quantization":
             # Fake (post-training) activation quantization controlled by eta.
@@ -172,8 +219,7 @@ class LLMActivationCompressor:
             # Bernoulli mask with deterministic generator seed.
             g = torch.Generator(device=hidden.device)
             g.manual_seed(int(self.config.random_seed))
-            mask = torch.rand(hidden.shape, generator=g,
-                              dtype=hidden.dtype, device=hidden.device) < float(eta)
+            mask = torch.rand_like(hidden, generator=g) < float(eta)
             return hidden * mask.to(hidden.dtype)
 
         raise ValueError(f"Unknown activation compression strategy: {self.config.strategy}")

@@ -38,12 +38,14 @@ def maybe_measured_tau_a() -> Optional[Tuple[Dict[int, float], Dict[int, float]]
     from src.core.measured_llm_profile import measured_tau_and_a
 
     model = os.environ.get("LLM_MEASURED_MODEL", "").strip().lower()
-    if model not in {"gemma_2b", "gemma_7b"}:
+    if model not in {"gemma_2b", "gemma_7b", "llama_3_1_8b"}:
         mid = os.environ.get("LLM_MODEL_NAME", "").lower()
         if "gemma-2b" in mid or "gemma_2b" in mid:
             model = "gemma_2b"
-        elif "7b" in mid:
+        elif "gemma-7b" in mid or "gemma_7b" in mid or ("gemma" in mid and "7b" in mid):
             model = "gemma_7b"
+        elif "llama" in mid:
+            model = "llama_3_1_8b"
         else:
             model = "gemma_2b"
 

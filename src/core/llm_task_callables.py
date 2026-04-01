@@ -15,7 +15,7 @@ from src.core.toy_A import grad_oracle
 @dataclass(frozen=True)
 class LLMBackendConfig:
     model_name: str
-    # magnitude | topk_per_token | random | quantization
+    # magnitude | topk_per_token | random | quantization | llmint8
     activation_strategy: str
     # split mode for choosing hook layer indices: thirds | half
     split_mode: str
@@ -99,10 +99,11 @@ class LLMInferenceTaskCallables:
         if config.split_mode == "thirds":
             cut1 = n_layers // 3
             cut2 = (2 * n_layers) // 3
+            split_label = f"thirds ({cut1}/{cut2 - cut1}/{n_layers - cut2})"
         elif config.split_mode == "half":
             cut1 = n_layers // 2
-            # If we still need two cut points, mirror the first to keep eta length = 2.
             cut2 = min(n_layers - 1, cut1 + 1)
+            split_label = "half"
         else:
             raise ValueError(f"Unknown split_mode: {config.split_mode}")
 
@@ -116,6 +117,13 @@ class LLMInferenceTaskCallables:
             random_seed=config.eval_seed,
         )
         self.compressor = LLMActivationCompressor(self.model, activation_cfg)
+
+        print(
+            f"[LLM backend] model={config.model_name}  "
+            f"n_layers={n_layers}  split={split_label}  "
+            f"hooks=[{cut1}, {cut2}]  strategy={config.activation_strategy}",
+            flush=True,
+        )
 
         # Evaluators
         fast_cfg = MMLUEvalConfig(
