@@ -219,7 +219,7 @@ class LLMActivationCompressor:
             # Bernoulli mask with deterministic generator seed.
             g = torch.Generator(device=hidden.device)
             g.manual_seed(int(self.config.random_seed))
-            mask = torch.rand_like(hidden, generator=g) < float(eta)
+            mask = torch.rand(hidden.shape, generator=g, device=hidden.device) < float(eta)
             return hidden * mask.to(hidden.dtype)
 
         raise ValueError(f"Unknown activation compression strategy: {self.config.strategy}")
