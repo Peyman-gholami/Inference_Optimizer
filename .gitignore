@@ -7,3 +7,4 @@ outputs*/
 .pytest_cache/
 __pycache__/*
 scripts/logs/
+scripts/old_scripts/
