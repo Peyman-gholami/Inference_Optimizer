@@ -9,8 +9,10 @@ This script demonstrates:
   5. Single-task baselines used by compare_to_baselines.py
   6. Multi-task baselines used by compare_to_baselines_multi.py
 
-All tasks use InferenceTaskCallables (MLP on MNIST with Stein gradient oracle),
+By default, tasks use InferenceTaskCallables (MLP on MNIST with Stein gradient oracle),
 as shown in src/core/task_callables.py.
+
+Optional LLM + MMLU backend: set INFERENCE_OPTIMIZER_BACKEND=llm (see README_LLM.md).
 
 Usage:
   python main.py
@@ -20,6 +22,7 @@ Requires: torch, torchvision, numpy, scipy (see requirements.txt)
 
 import os
 import sys
+from typing import Any
 
 # Ensure src/core is on path so task_callables can import accuracy_fn, toy_A, stein_oracles
 _root = os.path.dirname(os.path.abspath(__file__))

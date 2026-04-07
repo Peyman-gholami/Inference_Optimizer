@@ -288,8 +288,9 @@ def run_compare(
             else:
                 allocations = opt.optimize(t=t, c_t=c_t)
 
-            # if allocations is None:
-            #     continue
+            if allocations is None:
+                print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
+                continue
             print(f"algo: {name}, allocations: {allocations}")
             acc_hist[name][t] = _weighted_accuracy(tasks, allocations)
             excess_delay_hist[name][t] = _avg_excess_delay(opt, tasks, t, allocations, c_t)
