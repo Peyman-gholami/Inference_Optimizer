@@ -10,7 +10,10 @@ This script demonstrates:
   6. Multi-task baselines used by compare_to_baselines_multi.py
 
 By default, tasks use InferenceTaskCallables (MLP on MNIST with Stein gradient oracle),
+By default, tasks use InferenceTaskCallables (MLP on MNIST with Stein gradient oracle),
 as shown in src/core/task_callables.py.
+
+Optional LLM + MMLU backend: set INFERENCE_OPTIMIZER_BACKEND=llm (see README_LLM.md).
 
 Optional LLM + MMLU backend: set INFERENCE_OPTIMIZER_BACKEND=llm (see README_LLM.md).
 
@@ -23,6 +26,7 @@ Requires: torch, torchvision, numpy, scipy (see requirements.txt)
 import os
 import sys
 from typing import Any
+from typing import Any
 
 # Ensure src/core is on path so task_callables can import accuracy_fn, toy_A, stein_oracles
 _root = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +36,9 @@ sys.path.insert(0, os.path.join(_root, "src", "core"))
 import numpy as np
 
 # Core components
+from src.core.task import InferenceTask
+from src.core.task_callables import InferenceTaskCallables
+from src.core.llm_plug_in import is_llm_backend, maybe_measured_tau_a
 from src.core.task_handler import get_task
 from src.optimizers import (
     CSIAwareSingleTaskOptimizer,
@@ -62,6 +69,152 @@ from src.optimizers.estimators import (
     RunningMinEstimator,
     MovingAverageEstimator,
     MeanEstimator,
+)
+
+# ---------------------------------------------------------------------------
+# Setup: Train MLP, build InferenceTaskCallables (shared across demos)
+# ---------------------------------------------------------------------------
+
+def setup_model_and_callables():
+    """
+    Returns (api, flat_theta) for building tasks.
+
+    Default: train a small MLP on MNIST (api implements accuracy/gradient callables).
+
+    LLM mode: set INFERENCE_OPTIMIZER_BACKEND=llm — uses MMLU + activation compression
+    (see src/core/llm_task_callables.py). flat_theta is None in that case.
+    """
+    if is_llm_backend():
+        from src.core.llm_task_callables import build_llm_backend_from_env
+
+        eta_min0 = float(os.environ.get("ETA_MIN0", "0.25"))
+        eta_min1 = float(os.environ.get("ETA_MIN1", "0.25"))
+        eta_min = min(eta_min0, eta_min1)
+        api = build_llm_backend_from_env(eta_min=eta_min)
+        return api, None
+
+    torch.manual_seed(42)
+    device = torch.device("cpu")
+
+    # Data loaders
+    tf = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+    ])
+    train_loader = DataLoader(
+        datasets.MNIST("./data", train=True, download=True, transform=tf),
+        batch_size=128,
+        shuffle=True,
+    )
+    test_loader = DataLoader(
+        datasets.MNIST("./data", train=False, download=True, transform=tf),
+        batch_size=256,
+        shuffle=False,
+    )
+
+    # Train MLP (3 epochs)
+    from stein_oracles import MLP, get_flat_params
+    model = MLP().to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    print("Training MLP (3 epochs)...")
+    for _ in range(3):
+        model.train()
+        for x, y in train_loader:
+            opt.zero_grad()
+            F.cross_entropy(model(x), y).backward()
+            opt.step()
+
+    flat_theta = get_flat_params(model)
+
+    # 2 cut-points (links) -> 3-node chain topology
+    eta_init = torch.ones(2)
+    from accuracy_fn import CompressedModel
+    cm = CompressedModel(model, eta_init)
+    api = InferenceTaskCallables(
+        cm,
+        test_loader,
+        sigma=0.05,
+        N=50,
+        n_samples=512,
+        flat_theta=None,   # model already has trained weights — no swap needed (saves time)
+        device=device,
+    )
+
+    return api, flat_theta
+
+
+def make_task(task_id: int, api: Any, w_k: float = 1.0) -> InferenceTask:
+    """
+    Builds an InferenceTask from InferenceTaskCallables.
+
+    Topology: 3-node chain (L_k=3) — nodes 0, 1, 2 connected by links 0, 1.
+    The eta vector has one entry per link (compression ratio for that link).
+
+    Parameters
+    ----------
+    task_id : int
+        Unique identifier for this task. Used as key in optimizer output dict.
+    api : InferenceTaskCallables | LLMInferenceTaskCallables
+        Provides accuracy_callable(eta_np) -> float and gradient_callable(eta_np) -> np.ndarray.
+    w_k : float
+        Weight in the multi-task objective. Higher w_k = higher priority for accuracy.
+
+    Task Parameters (must match the optimizer's feasibility conditions)
+    ----------------------------------------------------------------
+    b_k : int
+        First node index of this task's path. b_k=0 means the task starts at node 0.
+    L_k : int
+        Number of nodes in the chain. L_k=3 -> nodes 0,1,2 and links 0,1.
+    tau : dict[int, float]
+        Compute time (seconds) per node. tau[i] = time to run computation at node i.
+        Small values (e.g. 0.01) keep the problem feasible.
+    a : dict[int, float]
+        Size (bytes or bits) per link. a[i] = data size sent over link i.
+        Used in delay constraint: delay on link i >= (a[i] * eta[i]) / c_i.
+    eta_min : dict[int, float]
+        Minimum compression ratio per link. eta[i] in [eta_min[i], 1.0].
+        Lower eta = more compression = less bandwidth but lower accuracy.
+    R_k_callable : callable t -> float
+        Target throughput R_k(t) packets/s. Max allowed delay = 1/R_k(t).
+
+    Environment (optional)
+    ----------------------
+    ETA_MIN0, ETA_MIN1 — per-link eta floors (default 0.1 / 0.05 for MNIST;
+    0.25 / 0.25 for LLM backend when vars are unset).
+    R_K or MEASURED_R_K — constant target throughput for toy/measured setups.
+    With LLM_USE_MEASURED_TAU_A=1, tau and a come from measured_llm_profile tables
+    (see README_LLM.md).
+    """
+    if is_llm_backend():
+        eta_min0 = float(os.environ.get("ETA_MIN0", "0.25"))
+        eta_min1 = float(os.environ.get("ETA_MIN1", "0.25"))
+    else:
+        eta_min0 = float(os.environ.get("ETA_MIN0", "0.1"))
+        eta_min1 = float(os.environ.get("ETA_MIN1", "0.05"))
+
+    measured = maybe_measured_tau_a()
+    if measured is not None:
+        tau, a = measured
+    else:
+        tau = {0: 0.01, 1: 0.01, 2: 0.01}
+        a = {0: 10.0, 1: 20.0}
+
+    r_k = float(os.environ.get("R_K", os.environ.get("MEASURED_R_K", "10.0")))
+
+    return InferenceTask(
+        task_id=task_id,
+        b_k=0,       # task starts at node 0
+        L_k=3,       # 3 nodes (0,1,2) -> 2 links (0,1)
+        tau=tau,
+        a=a,
+        eta_min={0: eta_min0, 1: eta_min1},
+        R_k_callable=lambda t, r=r_k: r,
+        w_k=w_k,                            # weight in multi-task objective
+        accuracy_callable=api.accuracy_callable,
+        accuracy_callable_true=api.accuracy_callable_true,
+        gradient_callable=api.gradient_callable,
+    )
+
     MeanMinusZStdLCB,
 )
 

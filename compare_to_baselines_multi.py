@@ -64,6 +64,15 @@ from src.optimizers.baseline import (
     DecoupledEqualSplitStochasticDescentMultiTaskBaseline,
     QueueProportionalHeuristicMultiTaskBaseline,
     HistoricalAverageCertaintyEquivalenceMultiTaskBaseline,
+)
+
+# Reuse the exact model + callables + task builder from main.py.
+_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _root)
+sys.path.insert(0, os.path.join(_root, "src", "core"))
+
+from main import setup_model_and_callables, make_task  # noqa: E402
+from src.core.llm_plug_in import llm_use_measured_tau_a  # noqa: E402
     LCBCertaintyEquivalenceMultiTaskBaseline,
 )
 
@@ -178,6 +187,12 @@ def run_compare(
         )
 
     # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
+    # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
+    if len(tasks) >= 2 and not llm_use_measured_tau_a():
+        # Task 1: smaller payloads (faster comm)
+        tasks[0].a = {0: 5.0, 1: 40.0}
+        # Task 2: larger payloads (slower comm)
+        tasks[1].a = {0: 20.0, 1: 25.0}
     # Scripted for the default 3-node / 2-link demo only.
     # if len(tasks) >= 2 and M == 3:
     #     tasks[0].a = {0: 5.0, 1: 40.0}
@@ -288,6 +303,9 @@ def run_compare(
             else:
                 allocations = opt.optimize(t=t, c_t=c_t)
 
+            if allocations is None:
+                print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
+                continue
             if allocations is None:
                 print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
                 continue
