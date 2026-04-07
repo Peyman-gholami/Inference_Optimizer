@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
-from stein_oracles import MLP, get_flat_params, set_flat_params
-from toy_A import grad_oracle
+from .stein_oracles import MLP, get_flat_params, set_flat_params
+from .toy_A import grad_oracle
 
 
 # ─────────────────────────────────────────────

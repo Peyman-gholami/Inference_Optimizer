@@ -91,6 +91,36 @@ def plot_accuracy_over_time(
     return _savefig(out_dir, "accuracy_over_time.png")
 
 
+def plot_excess_delay_over_time(
+    *,
+    times: np.ndarray,
+    algo_names: Sequence[str],
+    excess_delay_avg: np.ndarray,
+    out_dir: str,
+) -> str:
+    markers = _markers_for_algos(algo_names)
+    T = int(times.shape[0])
+    markevery = max(1, T // 10)
+
+    plt.figure(figsize=(12, 6))
+    for a, name in enumerate(algo_names):
+        plt.plot(
+            times,
+            excess_delay_avg[a],
+            label=name,
+            linewidth=1.5,
+            marker=markers[name],
+            markevery=markevery,
+            markersize=5,
+        )
+    plt.xlabel("Time slot t")
+    plt.ylabel("Cumulative average excess delay (D - 1/R_k)")
+    plt.title("Cumulative average excess delay over time")
+    plt.grid(True, alpha=0.3)
+    plt.legend(ncol=2, fontsize=9)
+    return _savefig(out_dir, "excess_delay_over_time.png")
+
+
 def plot_delay_ratio_over_time(
     *,
     times: np.ndarray,
@@ -98,6 +128,7 @@ def plot_delay_ratio_over_time(
     delay_ratio_avg: np.ndarray,
     out_dir: str,
 ) -> str:
+    """Legacy NPZ: delay / (1/R) ratio."""
     markers = _markers_for_algos(algo_names)
     T = int(times.shape[0])
     markevery = max(1, T // 10)
@@ -128,6 +159,7 @@ def plot_tradeoff(
     tradeoff_y: np.ndarray,
     out_dir: str,
     inset: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None,
+    excess_delay: bool = False,
 ) -> str:
     markers = _markers_for_algos(algo_names)
     plt.figure(figsize=(8, 6))
@@ -139,10 +171,18 @@ def plot_tradeoff(
             s=80,
             label=name,
         )
-    plt.axhline(1.0, color="black", linewidth=1.0, alpha=0.8)
-    plt.xlabel("Cumulative average accuracy at t = T-1")
-    plt.ylabel("Cumulative average delay / (1/R) at t = T-1")
-    plt.title("Accuracy vs feasibility (delay/(1/R)) at t = T-1")
+    if excess_delay:
+        plt.axhline(0.0, color="black", linewidth=1.0, alpha=0.8)
+        plt.xlabel("Cumulative average accuracy at t = T-1")
+        plt.ylabel("Cumulative average excess delay at t = T-1")
+        plt.title("Accuracy vs excess delay at t = T-1")
+        fname = "tradeoff_acc_vs_excess_delay_Tminus1.png"
+    else:
+        plt.axhline(1.0, color="black", linewidth=1.0, alpha=0.8)
+        plt.xlabel("Cumulative average accuracy at t = T-1")
+        plt.ylabel("Cumulative average delay / (1/R) at t = T-1")
+        plt.title("Accuracy vs feasibility (delay/(1/R)) at t = T-1")
+        fname = "tradeoff_acc_vs_delay_over_invR_Tminus1.png"
     plt.grid(True, alpha=0.3)
     plt.legend(ncol=1, fontsize=8)
 
@@ -164,6 +204,7 @@ def plot_tradeoff(
             borderpad=0.0,
         )
 
+        ref_y = 0.0 if excess_delay else 1.0
         for a, name in enumerate(algo_names):
             ax_inset.scatter(
                 float(tradeoff_x[a]),
@@ -171,13 +212,13 @@ def plot_tradeoff(
                 marker=markers[name],
                 s=30,
             )
-        ax_inset.axhline(1.0, color="black", linewidth=0.8, alpha=0.8)
+        ax_inset.axhline(ref_y, color="black", linewidth=0.8, alpha=0.8)
         ax_inset.set_xlim(x0, x1)
         ax_inset.set_ylim(y0, y1)
         ax_inset.grid(True, alpha=0.25)
         ax_inset.tick_params(axis="both", which="major", labelsize=8)
 
-    return _savefig(out_dir, "tradeoff_acc_vs_delay_over_invR_Tminus1.png")
+    return _savefig(out_dir, fname)
 
 
 def plot_eta_over_time(
@@ -323,6 +364,7 @@ def main() -> None:
     results: Dict[str, str] = {}
 
     acc_avg = npz_data.get("acc_avg")
+    excess_delay_avg = npz_data.get("excess_delay_avg")
     delay_ratio_avg = npz_data.get("delay_ratio_avg")
     tradeoff_x = npz_data.get("tradeoff_x")
     tradeoff_y = npz_data.get("tradeoff_y")
@@ -331,7 +373,14 @@ def main() -> None:
         results["accuracy_over_time"] = plot_accuracy_over_time(
             times=times, algo_names=algo_names, acc_avg=acc_avg, out_dir=out_dir
         )
-    if delay_ratio_avg is not None:
+    if excess_delay_avg is not None:
+        results["excess_delay_over_time"] = plot_excess_delay_over_time(
+            times=times,
+            algo_names=algo_names,
+            excess_delay_avg=excess_delay_avg,
+            out_dir=out_dir,
+        )
+    elif delay_ratio_avg is not None:
         results["delay_over_invR_over_time"] = plot_delay_ratio_over_time(
             times=times,
             algo_names=algo_names,
@@ -349,15 +398,17 @@ def main() -> None:
             except Exception:
                 is_multi_task = False
 
-        inset = (
-            ((0.75, 0.88), (0.8, 1.5)) if is_multi_task else None
-        )
+        use_excess = excess_delay_avg is not None
+        inset = None
+        if is_multi_task:
+            inset = ((0.75, 0.88), (-0.02, 0.15)) if use_excess else ((0.75, 0.88), (0.8, 1.5))
         results["tradeoff"] = plot_tradeoff(
             algo_names=algo_names,
             tradeoff_x=tradeoff_x,
             tradeoff_y=tradeoff_y,
             out_dir=out_dir,
             inset=inset,
+            excess_delay=use_excess,
         )
 
     if args.plot_eta:

@@ -266,6 +266,15 @@ class MovingAverageSingleTaskBaseline(EstimatedCSICompressionSingleTaskBaseline)
     """
 
 
+class LCBSingleTaskBaseline(EstimatedCSICompressionSingleTaskBaseline):
+    """
+    LCB baseline implemented by:
+      1. Producing `c_hat` with a lower-confidence-bound estimator (caller-owned),
+         e.g. `MeanMinusZStdLCB`.
+      2. Calling `EstimatedCSICompressionSingleTaskBaseline.optimize(t, c_hat)`.
+    """
+
+
 # =============================================================================
 # Multi-task baselines
 # =============================================================================
@@ -673,6 +682,23 @@ class HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(BaseOptimizer):
     No-CSI Multi-Task Baseline 6: Historical Average (Certainty Equivalence).
     This baseline expects a pre-computed c_hat(t) (historical mean) and then
     simply runs the CSI-aware multi-task convex solver on that c_hat.
+    """
+
+    def __init__(self, M: int, tasks: List[InferenceTask]):
+        super().__init__(M, tasks)
+        from src.optimizers.csi_aware import CSIAwareMultiTaskOptimizer
+
+        self._solver = CSIAwareMultiTaskOptimizer(M=M, tasks=tasks)
+
+    def optimize(self, t: int, c_hat: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
+        return self._solver.optimize(t=t, c_t=c_hat)
+
+
+class LCBCertaintyEquivalenceMultiTaskBaseline(BaseOptimizer):
+    """
+    No-CSI Multi-Task Baseline 7: LCB (Certainty Equivalence).
+    This baseline expects a pre-computed c_hat(t) from an LCB estimator and then
+    runs the CSI-aware multi-task convex solver on that c_hat.
     """
 
     def __init__(self, M: int, tasks: List[InferenceTask]):

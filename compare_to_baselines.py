@@ -3,7 +3,7 @@ Compare optimizers to baselines on a single-task setting.
 
 Runs a simulation for T time slots with i.i.d. uniform channel capacities and compares:
   - Accuracy A_k(eta(t)) over time
-  - delay/(1/R_k) = D_k(t) * R_k(t) over time (computed from returned allocations)
+  - Excess delay D_k(t) - 1/R_k(t) over time (same units as delay; 0 when tight to deadline)
 
 Algorithms included:
   - CSI-aware closed-form single-task optimizer (perfect c_t)
@@ -14,22 +14,34 @@ Algorithms included:
       3) UniformCompressionSingleTaskBaseline
       4) MyopicSingleTaskBaseline
       5) ConservativeSingleTaskBaseline
+      6) LCBSingleTaskBaseline
 
 Usage:
+  python compare_to_baselines.py --T 100 --seed 12 --c_min 10.0 --c_max 100.0 --mu 6.0 --epsilon 0.1 --out_dir outputs/baseline_compare1 --task toy_mlp_mnist --M 3 --R 10.0
   python compare_to_baselines.py --T 100 --seed 0
   python compare_to_baselines.py --T 100 --seed 0 \
       --baseline_algorithms max_compression,myopic,moving_average
   python compare_to_baselines.py --T 100 --seed 0 --baseline_algorithms none
   python compare_to_baselines.py --mu 3.0 --epsilon 0.1
+  python compare_to_baselines.py --R 20
+  python compare_to_baselines.py --M 3
+  python compare_to_baselines.py --R_range 10,60,10 --out_dir outputs/baseline_R_sweep
+    (runs range(10, 60, 10) i.e. R in {10,20,30,40,50}; each under out_dir/R_<value>/)
+
+  All inputs (single run; use --R_range start,stop,step instead of --R for a sweep):
+  python compare_to_baselines.py --T 100 --seed 12 --c_min 10.0 --c_max 100.0 --mu 6.0 --epsilon 0.1 --out_dir outputs/baseline_compare1 --task toy_mlp_mnist --M 3 --R 10.0
 """
 
 import argparse
-import os
 import json
+import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-import sys
+_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _root)
+sys.path.insert(0, os.path.join(_root, "src", "core"))
 
 import numpy as np
 
@@ -40,6 +52,7 @@ matplotlib.use("Agg")  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from src.core.task import InferenceTask
+from src.core.task_handler import get_task
 from src.optimizers.base import BaseOptimizer
 from src.optimizers.csi_aware import CSIAwareSingleTaskOptimizer
 from src.optimizers.no_csi import NoCSISingleTaskOptimizer
@@ -56,15 +69,8 @@ from src.optimizers.baseline import (
     MyopicSingleTaskBaseline,
     ConservativeSingleTaskBaseline,
     MovingAverageSingleTaskBaseline,
+    LCBSingleTaskBaseline,
 )
-
-# Reuse the exact model + callables + task builder from main.py.
-# We mirror main.py's path setup so `src/core/task_callables.py` can import core modules.
-_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _root)
-sys.path.insert(0, os.path.join(_root, "src", "core"))
-
-from main import setup_model_and_callables, make_task  # noqa: E402
 
 
 # ----------------------------
@@ -77,7 +83,7 @@ def _compute_accuracy(task: InferenceTask, allocations: Dict[int, Dict[str, np.n
     return float(task.A_k_true(eta))
 
 
-def _compute_delay_and_ratio(
+def _compute_delay_and_excess(
     optimizer: BaseOptimizer,
     task: InferenceTask,
     t: int,
@@ -89,8 +95,8 @@ def _compute_delay_and_ratio(
     R_k = float(task.get_R_k(t))
     inv_R = 1.0 / R_k
     delay = residual + inv_R
-    ratio = delay / inv_R  # delay / (1/R_k)
-    return delay, ratio
+    excess = delay - inv_R  # == residual; delay beyond 1/R_k target spacing
+    return delay, excess
 
 
 def run_compare(
@@ -102,17 +108,21 @@ def run_compare(
     baseline_algorithms: Optional[List[str]] = None,
     no_csi_mu: float = 3.0,
     no_csi_epsilon: float = 0.1,
- ) -> Tuple[str, str, str]:
+    R_k: float = 10.0,
+    task_name: str = "toy_mlp_mnist",
+    M: int = 3,
+) -> Tuple[str, str, str]:
     rng = np.random.default_rng(seed)
 
-    # Single task and topology (M=3 -> 2 links)
-    api, _ = setup_model_and_callables()
-    task = make_task(task_id=1, api=api)
-    M = 3
+    task = get_task(task_name, task_id=1, R_k=R_k)
+    if int(task.L_k) != int(M):
+        raise ValueError(
+            f"--M={M} must match task path length L_k={task.L_k} from task recipe {task_name!r}."
+        )
     num_links = M - 1
 
     # Algorithms
-    algos: List[Tuple[str, BaseOptimizer]] = [("CSI-aware (optimal)", CSIAwareSingleTaskOptimizer(M=M, tasks=[task]))]
+    algos: List[Tuple[str, BaseOptimizer]] = [("CSI-Aware (optimal)", CSIAwareSingleTaskOptimizer(M=M, tasks=[task]))]
 
     # No-CSI with LCB estimator (fed as c_hat)
     lcb = MeanMinusZStdLCB(
@@ -127,19 +137,19 @@ def run_compare(
         mu=no_csi_mu,
         epsilon=no_csi_epsilon,
     )
-    algos.append(("No-CSI (Alg1) + LCB(90%)", no_csi))
+    algos.append(("No-CSI (Alg1) + LCB", no_csi))
     
     baseline_catalog = {
         "max_compression": (
-            "Baseline: max compression",
+            "CSI-Aware Baseline: max compression",
             MaxCompressionSingleTaskBaseline(M=M, tasks=[task]),
         ),
         "no_compression": (
-            "Baseline: no compression",
+            "CSI-Aware Baseline: no compression",
             NoCompressionSingleTaskBaseline(M=M, tasks=[task]),
         ),
         "uniform_compression": (
-            "Baseline: uniform compression",
+            "CSI-Aware Baseline: uniform compression",
             UniformCompressionSingleTaskBaseline(M=M, tasks=[task]),
         ),
         "myopic": (
@@ -153,6 +163,10 @@ def run_compare(
         "moving_average": (
             "No-CSI Baseline: moving average",
             MovingAverageSingleTaskBaseline(M=M, tasks=[task]),
+        ),
+        "lcb": (
+            "No-CSI Baseline: LCB",
+            LCBSingleTaskBaseline(M=M, tasks=[task]),
         ),
     }
     selected_baselines = (
@@ -192,7 +206,7 @@ def run_compare(
     # Storage
     times = np.arange(T)
     acc_hist: Dict[str, np.ndarray] = {name: np.full(T, np.nan, dtype=float) for name, _ in algos}
-    delay_ratio_hist: Dict[str, np.ndarray] = {
+    excess_delay_hist: Dict[str, np.ndarray] = {
         name: np.full(T, np.nan, dtype=float) for name, _ in algos
     }
     eta_hist: Dict[str, np.ndarray] = {
@@ -209,7 +223,10 @@ def run_compare(
         print(f"c_t: {c_t}")
 
         for name, opt in algos:
-            if name == "No-CSI (Alg1) + LCB(90%)":
+            if name == "No-CSI (Alg1) + LCB":
+                c_hat = lcb.estimate(t)
+                allocations = opt.optimize(t=t, c_hat=c_hat)
+            elif name == "No-CSI Baseline: LCB":
                 c_hat = lcb.estimate(t)
                 allocations = opt.optimize(t=t, c_hat=c_hat)
             elif name == "No-CSI Baseline: myopic":
@@ -235,12 +252,12 @@ def run_compare(
                 continue
 
             acc_hist[name][t] = _compute_accuracy(task, allocations)
-            delay, delay_over_invR = _compute_delay_and_ratio(opt, task, t, allocations, c_t)
-            delay_ratio_hist[name][t] = delay_over_invR
+            delay, excess_delay = _compute_delay_and_excess(opt, task, t, allocations, c_t)
+            excess_delay_hist[name][t] = excess_delay
             eta_hist[name][t, :] = np.array(allocations[task.task_id]["eta"], dtype=float)
 
             # Dual update for No-CSI optimizer uses realized delay under true c_t.
-            if name == "No-CSI (Alg1) + LCB(90%)":
+            if name == "No-CSI (Alg1) + LCB":
                 opt.update_dual(t=t, actual_delays={task.task_id: delay})
 
         # After decisions and execution, all estimators get to observe c_t.
@@ -256,14 +273,14 @@ def run_compare(
 
     # Compute cumulative averages: avg[t] = mean(values[0:t+1])
     acc_avg: Dict[str, np.ndarray] = {}
-    delay_ratio_avg: Dict[str, np.ndarray] = {}
+    excess_delay_avg: Dict[str, np.ndarray] = {}
     eta_avg: Dict[str, np.ndarray] = {}
     for name, _ in algos:
         acc_avg[name] = np.array(
             [np.nanmean(acc_hist[name][: t + 1]) for t in range(T)], dtype=float
         )
-        delay_ratio_avg[name] = np.array(
-            [np.nanmean(delay_ratio_hist[name][: t + 1]) for t in range(T)], dtype=float
+        excess_delay_avg[name] = np.array(
+            [np.nanmean(excess_delay_hist[name][: t + 1]) for t in range(T)], dtype=float
         )
         eta_avg[name] = np.array(
             [np.nanmean(eta_hist[name][: t + 1, :], axis=0) for t in range(T)], dtype=float
@@ -278,20 +295,20 @@ def run_compare(
 
     # Stack per-algorithm dictionaries into dense tensors for easier re-loading.
     acc_hist_stack = np.stack([acc_hist[name] for name in algo_names], axis=0)  # (A, T)
-    delay_ratio_hist_stack = np.stack(
-        [delay_ratio_hist[name] for name in algo_names], axis=0
+    excess_delay_hist_stack = np.stack(
+        [excess_delay_hist[name] for name in algo_names], axis=0
     )  # (A, T)
     eta_hist_stack = np.stack([eta_hist[name] for name in algo_names], axis=0)  # (A, T, L)
 
     acc_avg_stack = np.stack([acc_avg[name] for name in algo_names], axis=0)  # (A, T)
-    delay_ratio_avg_stack = np.stack(
-        [delay_ratio_avg[name] for name in algo_names], axis=0
+    excess_delay_avg_stack = np.stack(
+        [excess_delay_avg[name] for name in algo_names], axis=0
     )  # (A, T)
     eta_avg_stack = np.stack([eta_avg[name] for name in algo_names], axis=0)  # (A, T, L)
 
     tradeoff_x = np.array([float(acc_avg[name][-1]) for name in algo_names], dtype=float)
     tradeoff_y = np.array(
-        [float(delay_ratio_avg[name][-1]) for name in algo_names], dtype=float
+        [float(excess_delay_avg[name][-1]) for name in algo_names], dtype=float
     )
 
     data_path = os.path.join(out_dir, "simulation_results.npz")
@@ -301,10 +318,10 @@ def run_compare(
         c_t_hist=c_t_hist,
         algo_names=np.array(algo_names, dtype=str),
         acc_hist=acc_hist_stack,
-        delay_ratio_hist=delay_ratio_hist_stack,
+        excess_delay_hist=excess_delay_hist_stack,
         eta_hist=eta_hist_stack,
         acc_avg=acc_avg_stack,
-        delay_ratio_avg=delay_ratio_avg_stack,
+        excess_delay_avg=excess_delay_avg_stack,
         eta_avg=eta_avg_stack,
         tradeoff_x=tradeoff_x,
         tradeoff_y=tradeoff_y,
@@ -317,6 +334,7 @@ def run_compare(
         "seed": int(seed),
         "c_min": float(c_min),
         "c_max": float(c_max),
+        "R_k": float(R_k),
         "num_links": int(num_links),
         "M": int(M),
         "task_id": int(task.task_id),
@@ -325,6 +343,8 @@ def run_compare(
         "no_csi_epsilon": float(no_csi_epsilon),
         "baseline_algorithms_used": list(selected_baselines),
         "algo_names": algo_names,
+        "task_name": str(task_name),
+        "delay_metric": "excess_delay_D_minus_invR",
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
@@ -359,9 +379,9 @@ def run_compare(
     plt.savefig(acc_path, dpi=180)
     plt.close()
 
-    # ----------------------------
-    # Plot 2: Average eta over time (per link)
-    # ----------------------------
+
+
+
     plt.figure(figsize=(12, 6))
     for name, _ in algos:
         # Plot per-link cumulative averages; label once per (algo, link)
@@ -387,13 +407,13 @@ def run_compare(
     plt.close()
 
     # ----------------------------
-    # Plot 3: Average delay / (1/R_k) over time
+    # Plot 3: Cumulative average excess delay over time
     # ----------------------------
     plt.figure(figsize=(12, 6))
     for name, _ in algos:
         plt.plot(
             times,
-            delay_ratio_avg[name],
+            excess_delay_avg[name],
             label=name,
             linewidth=1.5,
             marker=marker_map[name],
@@ -402,12 +422,12 @@ def run_compare(
         )
     plt.xlabel("Time slot t")
     plt.ylabel(
-        "Average D_k / (1/R_k) = (1/t) * sum_{s=0}^{t} D_k(s) / (1/R_k(s))"
+        "Average excess delay (1/t) * sum_s (D_k(s) - 1/R_k(s))"
     )
-    plt.title("Cumulative average delay / (1/R_k) over time (single task)")
+    plt.title("Cumulative average excess delay D_k - 1/R_k over time (single task)")
     plt.grid(True, alpha=0.3)
     plt.legend(ncol=2, fontsize=9)
-    res_path = os.path.join(out_dir, "delay_over_invR_over_time.png")
+    res_path = os.path.join(out_dir, "excess_delay_over_time.png")
     plt.tight_layout()
     plt.savefig(res_path, dpi=180)
     plt.close()
@@ -417,10 +437,10 @@ def run_compare(
     # ----------------------------
     plt.figure(figsize=(8, 6))
     for name, _ in algos:
-        # acc_avg[name] / delay_ratio_avg[name] are cumulative averages over time,
+        # acc_avg[name] / excess_delay_avg[name] are cumulative averages over time,
         # so the last entry corresponds to t = T-1.
         x = float(acc_avg[name][-1])
-        y = float(delay_ratio_avg[name][-1])
+        y = float(excess_delay_avg[name][-1])
         plt.scatter(
             x,
             y,
@@ -428,13 +448,13 @@ def run_compare(
             s=80,
             label=name,
         )
-    plt.axhline(1.0, color="black", linewidth=1.0, alpha=0.8)
+    plt.axhline(0.0, color="black", linewidth=1.0, alpha=0.8)
     plt.xlabel("Cumulative average accuracy at t = T-1")
-    plt.ylabel("Cumulative avg D_k / (1/R_k) at t = T-1")
-    plt.title("Accuracy vs feasibility (delay/(1/R)) at t = T-1")
+    plt.ylabel("Cumulative avg excess delay D_k - 1/R_k at t = T-1")
+    plt.title("Accuracy vs excess delay at t = T-1")
     plt.grid(True, alpha=0.3)
     plt.legend(ncol=1, fontsize=8)
-    tradeoff_path = os.path.join(out_dir, "tradeoff_acc_vs_delay_over_invR_Tminus1.png")
+    tradeoff_path = os.path.join(out_dir, "tradeoff_acc_vs_excess_delay_Tminus1.png")
     plt.tight_layout()
     plt.savefig(tradeoff_path, dpi=180)
     plt.close()
@@ -444,14 +464,14 @@ def run_compare(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--T", type=int, default=150)
+    p.add_argument("--T", type=int, default=100)
     p.add_argument("--seed", type=int, default=12)
     p.add_argument("--c_min", type=float, default=10.0)
-    p.add_argument("--c_max", type=float, default=150.0)
+    p.add_argument("--c_max", type=float, default=100.0)
     p.add_argument(
         "--mu",
         type=float,
-        default=3.0,
+        default=6.0,
         help="No-CSI (Alg1) parameter mu.",
     )
     p.add_argument(
@@ -460,16 +480,44 @@ def main() -> None:
         default=0.1,
         help="No-CSI (Alg1) minimum dual variable value epsilon.",
     )
-    p.add_argument("--out_dir", type=str, default="outputs/baseline_compare")
+    p.add_argument("--out_dir", type=str, default="outputs/baseline_compare1")
+    p.add_argument(
+        "--R",
+        type=float,
+        default=10.0,
+        help="Target throughput R_k (constant over t). Ignored if --R_range is set.",
+    )
+    p.add_argument(
+        "--R_range",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated integers start,stop,step — same as Python range(start, stop, step). "
+            "Example: 10,60,10 -> R_k in {10,20,30,40,50}. Outputs under <out_dir>/R_<n>/."
+        ),
+    )
+    p.add_argument(
+        "--task",
+        type=str,
+        default="toy_mlp_mnist",
+        help="Registered task family name (see src.core.task_handler).",
+    )
+    p.add_argument(
+        "--M",
+        type=int,
+        default=3,
+        dest="M",
+        help="Number of nodes in the line network; must equal the task's L_k from the chosen --task recipe.",
+    )
     p.add_argument(
         "--baseline_algorithms",
         type=str,
-        default="max_compression,no_compression,uniform_compression,myopic,conservative,moving_average",
+        default="max_compression,no_compression,uniform_compression,myopic,conservative,moving_average,lcb",
         help=(
             "Comma-separated baseline algorithms to include. "
             "Use 'none' to disable all baselines. "
             "Options: max_compression, no_compression, uniform_compression, "
-            "myopic, conservative, moving_average."
+            "myopic, conservative, moving_average, lcb."
         ),
     )
     args = p.parse_args()
@@ -483,26 +531,80 @@ def main() -> None:
             if part.strip()
         ]
 
-    acc_path, res_path, tradeoff_path = run_compare(
-        T=args.T,
-        seed=args.seed,
-        c_min=args.c_min,
-        c_max=args.c_max,
-        out_dir=args.out_dir,
-        baseline_algorithms=baseline_algorithms,
-        no_csi_mu=args.mu,
-        no_csi_epsilon=args.epsilon,
-    )
+    if args.R_range is not None:
+        parts = [int(x.strip()) for x in args.R_range.strip().split(",")]
+        start, stop, step = parts
+        R_list = [float(r) for r in range(start, stop, step)]
+        os.makedirs(args.out_dir, exist_ok=True)
+        sweep_entries: List[dict] = []
+        for R_k in R_list:
+            sub = os.path.join(args.out_dir, f"R_{R_k:g}")
+            print(f"\n=== Running compare for R_k = {R_k:g} -> {sub} ===\n")
+            acc_path, res_path, tradeoff_path = run_compare(
+                T=args.T,
+                seed=args.seed,
+                c_min=args.c_min,
+                c_max=args.c_max,
+                out_dir=sub,
+                baseline_algorithms=baseline_algorithms,
+                no_csi_mu=args.mu,
+                no_csi_epsilon=args.epsilon,
+                R_k=R_k,
+                task_name=args.task,
+                M=args.M,
+            )
+            sweep_entries.append(
+                {
+                    "R_k": float(R_k),
+                    "out_dir": sub,
+                    "accuracy_plot": acc_path,
+                    "excess_delay_plot": res_path,
+                    "tradeoff_plot": tradeoff_path,
+                    "simulation_results": os.path.join(sub, "simulation_results.npz"),
+                    "simulation_metadata": os.path.join(sub, "simulation_metadata.json"),
+                }
+            )
+        summary_path = os.path.join(args.out_dir, "R_sweep_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "R_range_spec": args.R_range.strip(),
+                    "T": args.T,
+                    "seed": args.seed,
+                    "task": args.task,
+                    "M": args.M,
+                    "runs": sweep_entries,
+                },
+                f,
+                indent=2,
+            )
+        print(f"\nR sweep complete. Summary written to: {summary_path}")
+        for e in sweep_entries:
+            print(f"  R_k={e['R_k']}: {e['out_dir']}")
+    else:
+        acc_path, res_path, tradeoff_path = run_compare(
+            T=args.T,
+            seed=args.seed,
+            c_min=args.c_min,
+            c_max=args.c_max,
+            out_dir=args.out_dir,
+            baseline_algorithms=baseline_algorithms,
+            no_csi_mu=args.mu,
+            no_csi_epsilon=args.epsilon,
+            R_k=args.R,
+            task_name=args.task,
+            M=args.M,
+        )
 
-    print(f"Saved accuracy plot to: {acc_path}")
-    print(f"Saved delay/(1/R) plot to: {res_path}")
-    print(f"Saved trade-off plot to: {tradeoff_path}")
-    print(
-        f"Saved raw simulation data to: {os.path.join(args.out_dir, 'simulation_results.npz')}"
-    )
-    print(
-        f"Saved simulation metadata to: {os.path.join(args.out_dir, 'simulation_metadata.json')}"
-    )
+        print(f"Saved accuracy plot to: {acc_path}")
+        print(f"Saved excess delay plot to: {res_path}")
+        print(f"Saved trade-off plot to: {tradeoff_path}")
+        print(
+            f"Saved raw simulation data to: {os.path.join(args.out_dir, 'simulation_results.npz')}"
+        )
+        print(
+            f"Saved simulation metadata to: {os.path.join(args.out_dir, 'simulation_metadata.json')}"
+        )
 
 
 if __name__ == "__main__":
