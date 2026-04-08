@@ -60,6 +60,7 @@ from src.optimizers.estimators import (
     RunningMinEstimator,
     MovingAverageEstimator,
     MeanEstimator,
+    MeanMinusZStdLCB,
 )
 
 # ---------------------------------------------------------------------------
@@ -206,8 +207,6 @@ def make_task(task_id: int, api: Any, w_k: float = 1.0) -> InferenceTask:
         gradient_callable=api.gradient_callable,
     )
 
-    MeanMinusZStdLCB,
-)
 
 DEFAULT_TASK_NAME = "toy_mlp_mnist"
 

@@ -64,17 +64,14 @@ from src.optimizers.baseline import (
     DecoupledEqualSplitStochasticDescentMultiTaskBaseline,
     QueueProportionalHeuristicMultiTaskBaseline,
     HistoricalAverageCertaintyEquivalenceMultiTaskBaseline,
+    LCBCertaintyEquivalenceMultiTaskBaseline,
 )
 
 # Reuse the exact model + callables + task builder from main.py.
 _root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _root)
 sys.path.insert(0, os.path.join(_root, "src", "core"))
-
-from main import setup_model_and_callables, make_task  # noqa: E402
-from src.core.llm_plug_in import llm_use_measured_tau_a  # noqa: E402
-    LCBCertaintyEquivalenceMultiTaskBaseline,
-)
+    
 
 
 def _parse_task_names(s: str) -> List[str]:
@@ -188,13 +185,13 @@ def run_compare(
 
     # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
     # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
-    if len(tasks) >= 2 and not llm_use_measured_tau_a():
-    # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
-    if len(tasks) >= 2 and not llm_use_measured_tau_a():
-        # Task 1: smaller payloads (faster comm)
-        tasks[0].a = {0: 5.0, 1: 40.0}
-        # Task 2: larger payloads (slower comm)
-        tasks[1].a = {0: 20.0, 1: 25.0}
+    # if len(tasks) >= 2 and not llm_use_measured_tau_a():
+    # # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
+    # if len(tasks) >= 2 and not llm_use_measured_tau_a():
+    #     # Task 1: smaller payloads (faster comm)
+    #     tasks[0].a = {0: 5.0, 1: 40.0}
+    #     # Task 2: larger payloads (slower comm)
+    #     tasks[1].a = {0: 20.0, 1: 25.0}
     # Scripted for the default 3-node / 2-link demo only.
     # if len(tasks) >= 2 and M == 3:
     #     tasks[0].a = {0: 5.0, 1: 40.0}
@@ -533,7 +530,7 @@ def main() -> None:
     p.add_argument(
         "--baseline_algorithms",
         type=str,
-        default="max_compression,no_compression,equal_share,proportional,strict_priority,decoupled_equal_split,queue_proportional,certainty_equivalence",
+        default="max_compression,no_compression,equal_share,proportional,strict_priority,decoupled_equal_split,queue_proportional,certainty_equivalence,lcb",
         help=(
             "Comma-separated baseline algorithms to include. "
             "Use 'none' to disable all baselines. "
