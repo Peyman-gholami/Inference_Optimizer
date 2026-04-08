@@ -72,6 +72,50 @@ sys.path.insert(0, _root)
 sys.path.insert(0, os.path.join(_root, "src", "core"))
 
 from main import setup_model_and_callables, make_task  # noqa: E402
+from src.core.llm_plug_in import llm_use_measured_tau_a  # noqa: E402
+    LCBCertaintyEquivalenceMultiTaskBaseline,
+)
+
+
+def _parse_task_names(s: str) -> List[str]:
+    return [part.strip() for part in s.split(",") if part.strip()]
+
+
+def _expand_task_names_for_k(names: List[str], K: int) -> List[str]:
+    """
+    One name -> repeat K times (same task family for every stream).
+    Otherwise require exactly K names (one registered task name per stream).
+    """
+    if len(names) == 1:
+        return [names[0]] * K
+    if len(names) != K:
+        raise ValueError(
+            f"Provide one --tasks name (used for all K={K} tasks) or exactly K={K} "
+            f"comma-separated names; got {len(names)}: {names!r}"
+        )
+    return names
+
+
+def _parse_float_list(s: str) -> List[float]:
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        raise ValueError(f"Expected at least one comma-separated number; got {s!r}")
+    return [float(p) for p in parts]
+
+
+def _expand_floats_for_k(vals: List[float], K: int, argname: str) -> List[float]:
+    if len(vals) == 1:
+        return [vals[0]] * K
+    if len(vals) != K:
+        raise ValueError(
+            f"{argname}: provide one value (repeated for all K={K} tasks) or exactly K={K} values; "
+            f"got {len(vals)}: {vals!r}"
+        )
+    return vals
+
+
+def _default_w_k_list(K: int) -> List[float]:
+    return [float(k + 1) for k in range(K)]
 
 
 def _weighted_accuracy(tasks: List[InferenceTask], allocations: Dict[int, Dict[str, np.ndarray]]) -> float:
@@ -143,6 +187,8 @@ def run_compare(
         )
 
     # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
+    # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
+    if len(tasks) >= 2 and not llm_use_measured_tau_a():
     # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
     if len(tasks) >= 2 and not llm_use_measured_tau_a():
         # Task 1: smaller payloads (faster comm)
@@ -259,8 +305,12 @@ def run_compare(
             else:
                 allocations = opt.optimize(t=t, c_t=c_t)
 
-            # if allocations is None:
-            #     continue
+            if allocations is None:
+                print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
+                continue
+            if allocations is None:
+                print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
+                continue
             print(f"algo: {name}, allocations: {allocations}")
             acc_hist[name][t] = _weighted_accuracy(tasks, allocations)
             excess_delay_hist[name][t] = _avg_excess_delay(opt, tasks, t, allocations, c_t)
