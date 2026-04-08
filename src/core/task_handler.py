@@ -12,9 +12,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from .task import InferenceTask
 from .task_callables import InferenceTaskCallables
+from .task_instances import resnet56_cifar10_topk
 from .task_instances import toy_mlp_mnist
 
 _REGISTRY: Dict[str, Any] = {
+    "resnet56_cifar10_topk": resnet56_cifar10_topk,
     "toy_mlp_mnist": toy_mlp_mnist,
 }
 
