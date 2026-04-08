@@ -582,32 +582,177 @@ def build_algorithms(
 # Simulation loop
 # ============================================================================
 
+def _save_checkpoint(
+    t: int,
+    out_dir: str,
+    algo_names: List[str],
+    times: np.ndarray,
+    c_t_hist: np.ndarray,
+    acc_hist: Dict,
+    delay_ratio_hist: Dict,
+    eta_hist: Dict,
+    lambda_t: float = 0.0,
+) -> None:
+    """Save a partial checkpoint after slot t so cancelled jobs are not lost."""
+    os.makedirs(out_dir, exist_ok=True)
+    T_done = t + 1
+    algo_names_arr = np.array(algo_names, dtype=str)
+    np.savez_compressed(
+        os.path.join(out_dir, "checkpoint.npz"),
+        T_done          = np.array([T_done], dtype=int),
+        lambda_t        = np.array([lambda_t], dtype=float),
+        times           = times[:T_done],
+        c_t_hist        = c_t_hist[:T_done],
+        algo_names      = algo_names_arr,
+        acc_hist        = np.stack([acc_hist[n][:T_done]           for n in algo_names]),
+        delay_ratio_hist= np.stack([delay_ratio_hist[n][:T_done]   for n in algo_names]),
+        eta_hist        = np.stack([eta_hist[n][:T_done]           for n in algo_names]),
+    )
+    print(f"  [checkpoint] saved at t={t}  lambda_t={lambda_t:.4f}"
+          f" → {out_dir}/checkpoint.npz", flush=True)
+
+
+def load_checkpoint(out_dir: str) -> Optional[Dict]:
+    """
+    Load a checkpoint from <out_dir>/checkpoint.npz.
+    Returns a dict with keys:
+      T_done, lambda_t, c_t_hist, algo_names,
+      acc_hist, delay_ratio_hist, eta_hist
+    or None if no checkpoint exists.
+    """
+    path = os.path.join(out_dir, "checkpoint.npz")
+    if not os.path.exists(path):
+        return None
+    data = dict(np.load(path, allow_pickle=True))
+    algo_names = list(data["algo_names"])
+    T_done     = int(data["T_done"][0])
+    lambda_t   = float(data["lambda_t"][0]) if "lambda_t" in data else 0.0
+
+    # Reconstruct per-algo dicts
+    acc_hist         = {n: data["acc_hist"][i]         for i, n in enumerate(algo_names)}
+    delay_ratio_hist = {n: data["delay_ratio_hist"][i] for i, n in enumerate(algo_names)}
+    eta_hist_raw     = data["eta_hist"]   # shape (A, T_done, L)
+
+    print(f"[load_checkpoint] Loaded checkpoint from {path}", flush=True)
+    print(f"  T_done={T_done}  lambda_t={lambda_t:.4f}  "
+          f"algos={algo_names}", flush=True)
+
+    return dict(
+        T_done           = T_done,
+        lambda_t         = lambda_t,
+        c_t_hist         = data["c_t_hist"],      # (T_done, num_links)
+        algo_names       = algo_names,
+        acc_hist         = acc_hist,
+        delay_ratio_hist = delay_ratio_hist,
+        eta_hist_raw     = eta_hist_raw,
+    )
+
+
 def run_simulation(
     task: InferenceTask,
     algos: List[Tuple[str, BaseOptimizer]],
     s: ExperimentSetting,
     lcb, myopic_est, cons_est, ma_est,
+    out_dir: str = "",
+    checkpoint_every: int = 5,
+    checkpoint: Optional[Dict] = None,
 ) -> Dict:
     """
     Run T time slots and return all history dicts.
+
+    Checkpointing
+    -------------
+    Every `checkpoint_every` slots a partial checkpoint is written to
+    <out_dir>/checkpoint.npz so that jobs cancelled by Slurm do not lose
+    all their work.  A SIGTERM handler (sent by Slurm before cancellation)
+    also triggers an immediate checkpoint save.
+
+    Resume
+    ------
+    If `checkpoint` is provided (loaded via load_checkpoint()), the simulation
+    resumes from T_done, restoring all history arrays, the RNG state, the
+    online estimators, and the No-CSI dual variable lambda_t.
     """
-    rng       = np.random.default_rng(s.seed)
+    import signal
+
     T         = s.T
     num_links = task.L_k - 1
     times     = np.arange(T)
+    algo_names= [n for n, _ in algos]
 
-    acc_hist        = {n: np.full(T, np.nan) for n, _ in algos}
-    delay_ratio_hist= {n: np.full(T, np.nan) for n, _ in algos}
-    eta_hist        = {n: np.full((T, num_links), np.nan) for n, _ in algos}
-    c_t_hist        = np.full((T, num_links), np.nan)
+    # ── Initialise or restore history arrays ──────────────────────────────────
+    if checkpoint is not None:
+        T_done   = checkpoint["T_done"]
+        lambda_t = checkpoint["lambda_t"]
+        print(f"[run_simulation] Resuming from t={T_done} "
+              f"(lambda_t={lambda_t:.4f})", flush=True)
 
-    for t in range(T):
+        # Restore full-size arrays and fill completed slots from checkpoint
+        acc_hist         = {n: np.full(T, np.nan) for n in algo_names}
+        delay_ratio_hist = {n: np.full(T, np.nan) for n in algo_names}
+        eta_hist         = {n: np.full((T, num_links), np.nan) for n in algo_names}
+        c_t_hist         = np.full((T, num_links), np.nan)
+
+        c_t_hist[:T_done] = checkpoint["c_t_hist"]
+        for i, name in enumerate(algo_names):
+            acc_hist[name][:T_done]          = checkpoint["acc_hist"][name]
+            delay_ratio_hist[name][:T_done]  = checkpoint["delay_ratio_hist"][name]
+            eta_hist[name][:T_done]          = checkpoint["eta_hist_raw"][i]
+
+        # Restore RNG by replaying T_done draws (same seed → same sequence)
+        rng = np.random.default_rng(s.seed)
+        for _ in range(T_done):
+            rng.uniform(low=s.c_min, high=s.c_max, size=num_links)
+
+        # Restore online estimators by replaying observed c_t values
+        for t_past in range(T_done):
+            c_past = c_t_hist[t_past]
+            lcb.update(c_past)
+            if myopic_est: myopic_est.update(c_past)
+            if cons_est:   cons_est.update(c_past)
+            if ma_est:     ma_est.update(c_past)
+
+        # Restore No-CSI dual variable
+        no_csi_opt = next((opt for name, opt in algos
+                           if name == "No-CSI (Alg1) + LCB(90%)"), None)
+        if no_csi_opt is not None:
+            no_csi_opt.lambda_t = max(no_csi_opt.epsilon, lambda_t)
+            print(f"[run_simulation] Restored lambda_t={no_csi_opt.lambda_t:.4f}",
+                  flush=True)
+
+        t_start = T_done
+    else:
+        rng              = np.random.default_rng(s.seed)
+        acc_hist         = {n: np.full(T, np.nan) for n, _ in algos}
+        delay_ratio_hist = {n: np.full(T, np.nan) for n, _ in algos}
+        eta_hist         = {n: np.full((T, num_links), np.nan) for n, _ in algos}
+        c_t_hist         = np.full((T, num_links), np.nan)
+        lambda_t         = s.no_csi_epsilon
+        t_start          = 0
+
+    # ── SIGTERM handler ───────────────────────────────────────────────────────
+    _last_t    = [t_start - 1]
+    _lambda_t  = [lambda_t]
+
+    def _sigterm_handler(signum, frame):
+        t_done = _last_t[0]
+        if t_done >= 0 and out_dir:
+            print(f"\n[run_simulation] SIGTERM at t={t_done} — saving checkpoint.",
+                  flush=True)
+            _save_checkpoint(t_done, out_dir, algo_names, times,
+                             c_t_hist, acc_hist, delay_ratio_hist, eta_hist,
+                             lambda_t=_lambda_t[0])
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    # ── Simulation loop ───────────────────────────────────────────────────────
+    for t in range(t_start, T):
         c_t = rng.uniform(low=s.c_min, high=s.c_max, size=num_links).astype(float)
         c_t_hist[t] = c_t
         print(f"  t={t:3d}  c_t={np.round(c_t, 1)}", flush=True)
 
         for name, opt in algos:
-            # Select c_hat or c_t depending on algorithm type
             if name == "No-CSI (Alg1) + LCB(90%)":
                 allocations = opt.optimize(t=t, c_hat=lcb.estimate(t))
             elif name == "Baseline: myopic" and myopic_est:
@@ -636,15 +781,21 @@ def run_simulation(
 
             if name == "No-CSI (Alg1) + LCB(90%)":
                 opt.update_dual(t=t, actual_delays={task.task_id: delay})
+                _lambda_t[0] = opt.lambda_t   # track for checkpoint
 
-        # Update online estimators after observing true c_t
         lcb.update(c_t)
         if myopic_est: myopic_est.update(c_t)
         if cons_est:   cons_est.update(c_t)
         if ma_est:     ma_est.update(c_t)
 
-    # Cumulative averages
-    algo_names = [n for n, _ in algos]
+        _last_t[0] = t
+
+        if out_dir and checkpoint_every > 0 and (t + 1) % checkpoint_every == 0:
+            _save_checkpoint(t, out_dir, algo_names, times,
+                             c_t_hist, acc_hist, delay_ratio_hist, eta_hist,
+                             lambda_t=_lambda_t[0])
+
+    # ── Cumulative averages ───────────────────────────────────────────────────
     acc_avg         = {}
     delay_ratio_avg = {}
     eta_avg         = {}
@@ -904,6 +1055,12 @@ def main():
     p.add_argument("--T",    type=int, default=150)
     p.add_argument("--seed", type=int, default=12)
 
+    # Resume
+    p.add_argument("--resume", action="store_true", default=False,
+                   help="Resume from checkpoint.npz in --out_dir. "
+                        "Loads history, restores RNG, estimators, and lambda_t, "
+                        "then continues from T_done to T.")
+
     # Output
     p.add_argument("--out_dir", type=str, default=None,
                    help="Output directory.  "
@@ -927,8 +1084,9 @@ def main():
     backend = args.backend
     c_min   = args.c_min   or (10.0   if backend == "mlp" else 500_000.0)
     c_max   = args.c_max   or (150.0  if backend == "mlp" else 5_000_000.0)
-    eta_min = args.eta_min or (0.05   if backend == "mlp" else
-                                0.125 if backend == "resnet" else 0.25)
+    eta_min = (args.eta_min if args.eta_min is not None else
+               (0.05  if backend == "mlp" else
+                0.125 if backend == "resnet" else 0.25))
 
     # LLM activation strategy: CLI arg > env var > default
     llm_strategy = (args.llm_activation_strategy
@@ -1003,7 +1161,25 @@ def main():
         print(f"  • {name}", flush=True)
     print(flush=True)
 
-    hist = run_simulation(task, algos, s, lcb, myopic_est, cons_est, ma_est)
+    # ── Load checkpoint if resuming ───────────────────────────────────────────
+    checkpoint = None
+    if args.resume:
+        checkpoint = load_checkpoint(out_dir)
+        if checkpoint is None:
+            print(f"[run_experiment] WARNING: --resume set but no checkpoint found in "
+                  f"{out_dir}. Starting from t=0.", flush=True)
+        else:
+            T_done = checkpoint["T_done"]
+            if T_done >= s.T:
+                print(f"[run_experiment] Checkpoint is already complete "
+                      f"(T_done={T_done} >= T={s.T}). Nothing to do.", flush=True)
+                return
+            print(f"[run_experiment] Resuming from t={T_done} → t={s.T-1}.",
+                  flush=True)
+
+    hist = run_simulation(task, algos, s, lcb, myopic_est, cons_est, ma_est,
+                          out_dir=out_dir, checkpoint_every=5,
+                          checkpoint=checkpoint)
 
     save_results(task, hist, s, out_dir)
     paths = plot_results(task, hist, s, out_dir)
