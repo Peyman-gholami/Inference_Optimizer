@@ -748,4 +748,450 @@ def run_simulation(
 
     # ── Simulation loop ───────────────────────────────────────────────────────
     for t in range(t_start, T):
-        c_t = rng.un
+        c_t = rng.uniform(low=s.c_min, high=s.c_max, size=num_links).astype(float)
+        c_t_hist[t] = c_t
+        print(f"  t={t:3d}  c_t={np.round(c_t, 1)}", flush=True)
+
+        for name, opt in algos:
+            if name == "No-CSI (Alg1) + LCB(90%)":
+                allocations = opt.optimize(t=t, c_hat=lcb.estimate(t))
+            elif name == "Baseline: myopic" and myopic_est:
+                allocations = opt.optimize(t=t, c_hat=myopic_est.estimate(t))
+            elif name == "Baseline: conservative" and cons_est:
+                allocations = opt.optimize(t=t, c_hat=cons_est.estimate(t))
+            elif name == "Baseline: moving average" and ma_est:
+                allocations = opt.optimize(t=t, c_hat=ma_est.estimate(t))
+            else:
+                allocations = opt.optimize(t=t, c_t=c_t)
+
+            if allocations is None:
+                continue
+
+            eta = allocations[task.task_id]["eta"]
+            acc_hist[name][t] = float(task.A_k_true(eta))
+
+            residuals = opt.compute_residual_delay(t, allocations, c_t)
+            residual  = float(residuals[task.task_id])
+            R_k       = float(task.get_R_k(t))
+            inv_R     = 1.0 / R_k
+            delay     = residual + inv_R
+            delay_ratio_hist[name][t] = delay / inv_R
+
+            eta_hist[name][t] = np.array(eta, dtype=float)
+
+            if name == "No-CSI (Alg1) + LCB(90%)":
+                opt.update_dual(t=t, actual_delays={task.task_id: delay})
+                _lambda_t[0] = opt.lambda_t   # track for checkpoint
+
+        lcb.update(c_t)
+        if myopic_est: myopic_est.update(c_t)
+        if cons_est:   cons_est.update(c_t)
+        if ma_est:     ma_est.update(c_t)
+
+        _last_t[0] = t
+
+        if out_dir and checkpoint_every > 0 and (t + 1) % checkpoint_every == 0:
+            _save_checkpoint(t, out_dir, algo_names, times,
+                             c_t_hist, acc_hist, delay_ratio_hist, eta_hist,
+                             lambda_t=_lambda_t[0])
+
+    # ── Cumulative averages ───────────────────────────────────────────────────
+    acc_avg         = {}
+    delay_ratio_avg = {}
+    eta_avg         = {}
+    for name in algo_names:
+        acc_avg[name]         = np.array([np.nanmean(acc_hist[name][:t+1])
+                                          for t in range(T)])
+        delay_ratio_avg[name] = np.array([np.nanmean(delay_ratio_hist[name][:t+1])
+                                          for t in range(T)])
+        eta_avg[name]         = np.array([np.nanmean(eta_hist[name][:t+1], axis=0)
+                                          for t in range(T)])
+
+    return dict(
+        times=times, c_t_hist=c_t_hist,
+        acc_hist=acc_hist, delay_ratio_hist=delay_ratio_hist, eta_hist=eta_hist,
+        acc_avg=acc_avg, delay_ratio_avg=delay_ratio_avg, eta_avg=eta_avg,
+        algo_names=algo_names,
+    )
+
+
+# ============================================================================
+# Plotting
+# ============================================================================
+
+def _setting_text(fig, s: ExperimentSetting, fontsize: int = 6.5):
+    """
+    Add the experiment setting as a small text block below the plot area.
+    Placed outside the axes so it never overlaps data or legend.
+    """
+    fig.text(
+        0.01, 0.01, s.detail_label(),
+        fontsize=fontsize,
+        verticalalignment='bottom',
+        horizontalalignment='left',
+        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                  edgecolor='grey', alpha=0.85),
+        family='monospace',
+    )
+
+
+def _markers():
+    return ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "H"]
+
+
+def plot_results(
+    task: InferenceTask,
+    hist: Dict,
+    s: ExperimentSetting,
+    out_dir: str,
+) -> Dict[str, str]:
+    """
+    Produce all four comparison plots.
+    Returns dict mapping plot name -> file path.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    algo_names      = hist["algo_names"]
+    times           = hist["times"]
+    acc_avg         = hist["acc_avg"]
+    delay_ratio_avg = hist["delay_ratio_avg"]
+    eta_avg         = hist["eta_avg"]
+    T               = s.T
+    num_links       = task.L_k - 1
+
+    markers   = _markers()
+    marker_map= {n: markers[i % len(markers)] for i, n in enumerate(algo_names)}
+    markevery = max(1, T // 10)
+    paths     = {}
+
+    # Extra bottom margin to accommodate the setting text box below the plot.
+    # Extra right margin to accommodate the external legend.
+    BOTTOM  = 0.22   # fraction of figure height reserved at bottom
+    RIGHT   = 0.72   # axes right edge (rest is legend space)
+
+    # ── Plot 1: Cumulative average accuracy ─────────────────────────────────
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for name in algo_names:
+        ax.plot(times, acc_avg[name], label=name, linewidth=1.5,
+                marker=marker_map[name], markevery=markevery, markersize=5)
+    ax.set_xlabel("Time slot t")
+    ax.set_ylabel("Cumulative avg accuracy  (1/t) Σ A_k(η(s))")
+    ax.set_title(f"Accuracy over time\n{s.short_label()}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=1, fontsize=8, loc='upper left',
+              bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    fig.subplots_adjust(bottom=BOTTOM, right=RIGHT)
+    _setting_text(fig, s)
+    p = os.path.join(out_dir, "accuracy_over_time.png")
+    fig.savefig(p, dpi=180, bbox_inches='tight'); plt.close(fig)
+    paths["accuracy"] = p
+
+    # ── Plot 2: Cumulative average eta per link ──────────────────────────────
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for name in algo_names:
+        for li in range(num_links):
+            ax.plot(times, eta_avg[name][:, li],
+                    label=f"{name} (link {li})",
+                    linewidth=1.2,
+                    marker=marker_map[name], markevery=markevery, markersize=4)
+    ax.set_xlabel("Time slot t")
+    ax.set_ylabel("Cumulative avg η")
+    ax.set_title(f"Compression ratio η over time\n{s.short_label()}")
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=1, fontsize=7, loc='upper left',
+              bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    fig.subplots_adjust(bottom=BOTTOM, right=RIGHT)
+    _setting_text(fig, s)
+    p = os.path.join(out_dir, "eta_over_time.png")
+    fig.savefig(p, dpi=180, bbox_inches='tight'); plt.close(fig)
+    paths["eta"] = p
+
+    # ── Plot 3: Cumulative average delay / (1/R_k) ──────────────────────────
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for name in algo_names:
+        ax.plot(times, delay_ratio_avg[name], label=name, linewidth=1.5,
+                marker=marker_map[name], markevery=markevery, markersize=5)
+    ax.axhline(1.0, color="black", linewidth=1.2, linestyle="--",
+               label="Feasibility boundary (D_k = 1/R_k)")
+    ax.set_xlabel("Time slot t")
+    ax.set_ylabel("Cumulative avg  D_k / (1/R_k)")
+    ax.set_title(f"Delay ratio over time\n{s.short_label()}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=1, fontsize=8, loc='upper left',
+              bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    fig.subplots_adjust(bottom=BOTTOM, right=RIGHT)
+    _setting_text(fig, s)
+    p = os.path.join(out_dir, "delay_over_invR_time.png")
+    fig.savefig(p, dpi=180, bbox_inches='tight'); plt.close(fig)
+    paths["delay"] = p
+
+    # ── Plot 4: Accuracy vs delay scatter at t = T-1 ────────────────────────
+    fig, ax = plt.subplots(figsize=(12, 7))
+    for name in algo_names:
+        x = float(acc_avg[name][-1])
+        y = float(delay_ratio_avg[name][-1])
+        ax.scatter(x, y, marker=marker_map[name], s=100, label=name, zorder=3)
+        ax.annotate(name, (x, y), textcoords="offset points",
+                    xytext=(6, 4), fontsize=7, clip_on=True)
+    ax.axhline(1.0, color="black", linewidth=1.2, linestyle="--",
+               label="Feasibility boundary")
+    ax.set_xlabel("Cumulative avg accuracy at t = T-1")
+    ax.set_ylabel("Cumulative avg  D_k / (1/R_k)  at t = T-1")
+    ax.set_title(f"Accuracy vs delay trade-off at t = T-1\n{s.short_label()}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=1, fontsize=8, loc='upper left',
+              bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    fig.subplots_adjust(bottom=BOTTOM, right=RIGHT)
+    _setting_text(fig, s, fontsize=6)
+    p = os.path.join(out_dir, "tradeoff.png")
+    fig.savefig(p, dpi=180, bbox_inches='tight'); plt.close(fig)
+    paths["tradeoff"] = p
+
+    return paths
+
+
+# ============================================================================
+# Save results
+# ============================================================================
+
+def save_results(
+    task: InferenceTask,
+    hist: Dict,
+    s: ExperimentSetting,
+    out_dir: str,
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    algo_names = hist["algo_names"]
+
+    # Experiment setting JSON
+    setting_dict = asdict(s)
+    setting_dict["a"]              = {str(k): v for k, v in s.a.items()}
+    setting_dict["tau"]            = {str(k): v for k, v in s.tau.items()}
+    setting_dict["eta_min_per_link"]= {str(k): v for k, v in s.eta_min_per_link.items()}
+    with open(os.path.join(out_dir, "experiment_setting.json"), "w") as f:
+        json.dump(setting_dict, f, indent=2, sort_keys=True)
+
+    # Raw time-series as npz
+    np.savez_compressed(
+        os.path.join(out_dir, "simulation_results.npz"),
+        times           = hist["times"],
+        c_t_hist        = hist["c_t_hist"],
+        algo_names      = np.array(algo_names, dtype=str),
+        acc_avg         = np.stack([hist["acc_avg"][n]         for n in algo_names]),
+        delay_ratio_avg = np.stack([hist["delay_ratio_avg"][n] for n in algo_names]),
+        eta_avg         = np.stack([hist["eta_avg"][n]         for n in algo_names]),
+        acc_hist        = np.stack([hist["acc_hist"][n]        for n in algo_names]),
+        delay_ratio_hist= np.stack([hist["delay_ratio_hist"][n]for n in algo_names]),
+    )
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Run all algorithms + baselines for one experimental setting."
+    )
+
+    # Backend
+    p.add_argument("--backend", type=str, default="mlp",
+                   choices=["mlp", "resnet", "llm"],
+                   help="Model backend.  Reads env vars for ResNet/LLM details.")
+
+    # Compressor — for ResNet and MLP
+    p.add_argument("--compressor", type=str, default="topk",
+                   choices=["topk", "quantization", "llmint8"],
+                   help="Compression algorithm for ResNet/MLP.  "
+                        "(llmint8 not supported for MLP.)")
+    p.add_argument("--compressor_backend", type=str, default="cpu",
+                   choices=["cpu", "gpu"],
+                   help="cpu = compressors.py round-trip;  gpu = gpu_compressors.py.")
+
+    # LLM-specific
+    p.add_argument("--llm_activation_strategy", type=str, default=None,
+                   choices=["topk_per_token", "magnitude", "random",
+                            "quantization", "llmint8", None],
+                   help="LLM activation compression strategy.  "
+                        "Overrides LLM_ACTIVATION_STRATEGY env var.  "
+                        "For llmint8, also set --compressor_backend gpu.")
+    p.add_argument("--llm_model_name", type=str, default=None,
+                   help="HuggingFace model ID for LLM backend.  "
+                        "Overrides LLM_MODEL_NAME env var.  "
+                        "e.g. unsloth/gemma-2b-it or meta-llama/Llama-3.1-8B-Instruct")
+    p.add_argument("--llm_grad_N",     type=int,   default=None,
+                   help="Stein N for LLM backend (default: 3).")
+    p.add_argument("--llm_fast_samples", type=int, default=None,
+                   help="MMLU samples per subject for fast eval (default: 5).")
+
+    # MLP-specific
+    p.add_argument("--mlp_sigma", type=float, default=None,
+                   help="Stein sigma for MLP backend (default: 0.05).")
+    p.add_argument("--mlp_N",     type=int,   default=None,
+                   help="Stein N for MLP backend (default: 50).")
+
+    # Channel distribution
+    p.add_argument("--c_min", type=float, default=None,
+                   help="Channel capacity lower bound.  "
+                        "Default: 10 (MLP), 500000 (ResNet/LLM).")
+    p.add_argument("--c_max", type=float, default=None,
+                   help="Channel capacity upper bound.  "
+                        "Default: 150 (MLP), 5000000 (ResNet/LLM).")
+
+    # Task parameters
+    p.add_argument("--R_k",     type=float, default=10.0,
+                   help="Constant target throughput R_k(t).")
+    p.add_argument("--eta_min", type=float, default=None,
+                   help="η floor on every link.  "
+                        "Default: 0.05 (MLP), 0.125 (ResNet), 0.25 (LLM).")
+
+    # No-CSI algorithm parameters
+    p.add_argument("--no_csi_mu",      type=float, default=3.0)
+    p.add_argument("--no_csi_epsilon", type=float, default=0.1)
+
+    # Sweep / run parameters
+    p.add_argument("--T",    type=int, default=150)
+    p.add_argument("--seed", type=int, default=12)
+
+    # Resume
+    p.add_argument("--resume", action="store_true", default=False,
+                   help="Resume from checkpoint.npz in --out_dir. "
+                        "Loads history, restores RNG, estimators, and lambda_t, "
+                        "then continues from T_done to T.")
+
+    # Output
+    p.add_argument("--out_dir", type=str, default=None,
+                   help="Output directory.  "
+                        "Default: outputs/experiments/<backend>_<compressor>_<seed>")
+
+    # Baselines
+    p.add_argument(
+        "--baselines", type=str,
+        default="max_compression,no_compression,uniform_compression,"
+                "myopic,conservative,moving_average",
+        help="Comma-separated baseline keys, or 'none'."
+    )
+
+    args = p.parse_args()
+
+    # Set backend env var before importing any backend modules
+    backend_env = {"mlp": "mnist", "resnet": "resnet", "llm": "llm"}[args.backend]
+    os.environ.setdefault("INFERENCE_OPTIMIZER_BACKEND", backend_env)
+
+    # Apply defaults that depend on backend
+    backend = args.backend
+    c_min   = args.c_min   or (10.0   if backend == "mlp" else 500_000.0)
+    c_max   = args.c_max   or (150.0  if backend == "mlp" else 5_000_000.0)
+    eta_min = (args.eta_min if args.eta_min is not None else
+               (0.05  if backend == "mlp" else
+                0.125 if backend == "resnet" else 0.25))
+
+    # LLM activation strategy: CLI arg > env var > default
+    llm_strategy = (args.llm_activation_strategy
+                    or os.environ.get("LLM_ACTIVATION_STRATEGY", "topk_per_token"))
+    llm_model    = (args.llm_model_name
+                    or os.environ.get("LLM_MODEL_NAME", "unsloth/gemma-2b-it"))
+
+    # Parse baselines
+    bl_arg    = args.baselines.strip().lower()
+    baselines = [] if bl_arg == "none" else [b.strip() for b in bl_arg.split(",") if b.strip()]
+
+    # Build setting record — all parameters visible
+    s = ExperimentSetting(
+        backend            = backend,
+        compressor         = args.compressor,
+        compressor_backend = args.compressor_backend,
+        c_min              = c_min,
+        c_max              = c_max,
+        c_dist             = "uniform",
+        R_k                = args.R_k,
+        eta_min            = eta_min,
+        T                  = args.T,
+        seed               = args.seed,
+        no_csi_mu          = args.no_csi_mu,
+        no_csi_epsilon     = args.no_csi_epsilon,
+        # LLM
+        llm_model_name          = llm_model,
+        llm_activation_strategy = llm_strategy,
+        llm_split_mode          = os.environ.get("LLM_SPLIT_MODE", "thirds"),
+        llm_grad_sigma          = float(os.environ.get("LLM_GRAD_SIGMA", "0.05")),
+        llm_grad_N              = args.llm_grad_N or int(os.environ.get("LLM_GRAD_N", "3")),
+        llm_fast_samples        = args.llm_fast_samples or int(os.environ.get("MMLU_FAST_SAMPLES_PER_SUBJECT", "5")),
+        llm_full_samples        = int(os.environ.get("MMLU_FULL_SAMPLES_PER_SUBJECT", "10")),
+        llm_batch_size          = int(os.environ.get("MMLU_BATCH_SIZE", "8")),
+        # ResNet
+        resnet_cutpoints    = os.environ.get("RESNET_CUTPOINTS", "8,14,21"),
+        resnet_fast_batches = int(os.environ.get("RESNET_FAST_BATCHES", "1")),
+        resnet_grad_sigma   = float(os.environ.get("RESNET_GRAD_SIGMA", "0.05")),
+        resnet_grad_N       = int(os.environ.get("RESNET_GRAD_N", "20")),
+        # MLP
+        mlp_sigma    = args.mlp_sigma or float(os.environ.get("MLP_GRAD_SIGMA", "0.05")),
+        mlp_N        = args.mlp_N     or int(os.environ.get("MLP_GRAD_N", "50")),
+        mlp_n_samples= int(os.environ.get("MLP_N_SAMPLES", "512")),
+    )
+
+    # For LLM + llmint8, force compressor_backend=gpu
+    if backend == "llm" and llm_strategy == "llmint8" and args.compressor_backend == "cpu":
+        print("[run_experiment] WARNING: llmint8 strategy requires gpu backend. "
+              "Setting compressor_backend=gpu.", flush=True)
+        s.compressor_backend = "gpu"
+
+    out_dir = args.out_dir or os.path.join(
+        "outputs", "experiments",
+        f"{backend}_{args.compressor if backend != 'llm' else llm_strategy}"
+        f"_{args.compressor_backend}_seed{args.seed}"
+    )
+
+    # ── Print full configuration before loading any model ────────────────────
+    s.full_printout(out_dir, baselines)
+
+    api, _ = load_backend(s)
+    task   = build_task(s, api)
+
+    # ── Print again after topology is derived (a, tau, eta_min_per_link filled) ─
+    print("\n[run_experiment] Topology derived — updated configuration:", flush=True)
+    s.full_printout(out_dir, baselines)
+
+    algos, myopic_est, cons_est, ma_est, lcb = build_algorithms(task, s, baselines)
+
+    print(f"[run_experiment] Algorithms ({len(algos)}):", flush=True)
+    for name, _ in algos:
+        print(f"  • {name}", flush=True)
+    print(flush=True)
+
+    # ── Load checkpoint if resuming ───────────────────────────────────────────
+    checkpoint = None
+    if args.resume:
+        checkpoint = load_checkpoint(out_dir)
+        if checkpoint is None:
+            print(f"[run_experiment] WARNING: --resume set but no checkpoint found in "
+                  f"{out_dir}. Starting from t=0.", flush=True)
+        else:
+            T_done = checkpoint["T_done"]
+            if T_done >= s.T:
+                print(f"[run_experiment] Checkpoint is already complete "
+                      f"(T_done={T_done} >= T={s.T}). Nothing to do.", flush=True)
+                return
+            print(f"[run_experiment] Resuming from t={T_done} → t={s.T-1}.",
+                  flush=True)
+
+    hist = run_simulation(task, algos, s, lcb, myopic_est, cons_est, ma_est,
+                          out_dir=out_dir, checkpoint_every=5,
+                          checkpoint=checkpoint)
+
+    save_results(task, hist, s, out_dir)
+    paths = plot_results(task, hist, s, out_dir)
+
+    print("\n" + "=" * 65, flush=True)
+    print("Done.", flush=True)
+    for label, path in paths.items():
+        print(f"  {label:<12} -> {path}", flush=True)
+    print(f"  {'setting':<12} -> {os.path.join(out_dir, 'experiment_setting.json')}", flush=True)
+    print(f"  {'raw data':<12} -> {os.path.join(out_dir, 'simulation_results.npz')}", flush=True)
+    print("=" * 65, flush=True)
+
+
+if __name__ == "__main__":
+    main()
