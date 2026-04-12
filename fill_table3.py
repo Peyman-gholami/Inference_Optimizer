@@ -68,11 +68,13 @@ ALGO_SHORT = {
 }
 
 COMP_KEYS   = ["topk", "quant", "int8"]   # column sub-headers T Q I8
-METRICS     = ["acc", "delay_ms", "delay_ratio"]
+METRICS     = ["utility", "acc", "delay_ms", "excess_delay_ms", "delay_ratio"]
 METRIC_LABELS = {
-    "acc":         "Avg.~acc./qual.",
-    "delay_ms":    "Avg.~delay (ms)",
-    "delay_ratio": "Delay ratio",
+    "utility":          "Avg.~utility",
+    "acc":              "Avg.~acc./qual.",
+    "delay_ms":         "Avg.~delay (ms)",
+    "excess_delay_ms":  "Excess delay (ms)",
+    "delay_ratio":      "Delay ratio",
 }
 
 
@@ -107,10 +109,16 @@ def extract_metrics(data: dict, setting: dict, t_idx: int = -1) -> dict:
 
     out = {}
     for i, name in enumerate(algo_names):
-        acc         = float(acc_avg_arr[i, t_idx])
-        delay_ratio = float(dr_avg_arr[i, t_idx])
-        delay_ms    = delay_ratio * inv_R * 1000.0
-        out[name]   = dict(acc=acc, delay_ms=delay_ms, delay_ratio=delay_ratio)
+        acc              = float(acc_avg_arr[i, t_idx])
+        delay_ratio      = float(dr_avg_arr[i, t_idx])
+        delay_ms         = delay_ratio * inv_R * 1000.0
+        excess_delay_ms  = (delay_ratio - 1.0) * inv_R * 1000.0
+        # For single-task K=1, w_k=1: aggregate utility = acc exactly.
+        # Stored separately so multi-task extension can override this.
+        utility          = acc
+        out[name] = dict(utility=utility, acc=acc, delay_ms=delay_ms,
+                         excess_delay_ms=excess_delay_ms,
+                         delay_ratio=delay_ratio)
     return out
 
 
@@ -244,9 +252,9 @@ def make_repro_table(repro_rows: list) -> str:
 # ── Table 3 filling ───────────────────────────────────────────────────────────
 
 def fmt_val(v: float, metric: str) -> str:
-    if metric == "acc":
+    if metric in ("acc", "utility"):
         return f"{v:.4f}"
-    elif metric == "delay_ms":
+    elif metric in ("delay_ms", "excess_delay_ms"):
         return f"{v:.2f}"
     else:  # delay_ratio
         return f"{v:.3f}"
@@ -254,18 +262,18 @@ def fmt_val(v: float, metric: str) -> str:
 
 def fill_table3_scenario(
     scenario:    str,
-    runs:        dict,   # {"topk": metrics_dict, "quant": ..., "int8": ...}
+    runs:        dict,
     t_idx:       int = -1,
 ) -> list:
     """
-    Generate the 3 data rows (acc, delay_ms, delay_ratio) for one scenario
-    in Table 3. Returns list of LaTeX row strings.
-
+    Generate 4 data rows (acc, delay_ms, excess_delay_ms, delay_ratio)
+    for one scenario in Table 3.
     Each row has 24 cells: 8 algorithms × 3 compression methods.
     Missing runs show '--'.
     """
     rows = []
     is_first = True
+    n_rows = len(METRICS)
 
     for metric in METRICS:
         cells = []
@@ -279,12 +287,11 @@ def fill_table3_scenario(
                     v = algo_metrics[metric]
                     cells.append(fmt_val(v, metric))
 
-        # Bold the best value in Ours-CSI and Ours-NoCSI columns
-        # (last 6 cells) for acc (higher is better) and delay_ratio (lower is better)
-        ours_start = len(ALGO_COL_ORDER) * len(COMP_KEYS) - 2 * len(COMP_KEYS)
+        # Bold best value in Ours-CSI and Ours-NoCSI groups
+        ours_start   = len(ALGO_COL_ORDER) * len(COMP_KEYS) - 2 * len(COMP_KEYS)
         best_indices = set()
-        if metric == "acc":
-            # Bold highest accuracy in Ours-CSI and Ours-NoCSI groups
+        if metric in ("acc", "utility"):
+            # Higher is better
             for group_start in [ours_start, ours_start + len(COMP_KEYS)]:
                 group_vals = []
                 for j in range(len(COMP_KEYS)):
@@ -293,21 +300,18 @@ def fill_table3_scenario(
                     except ValueError:
                         pass
                 if group_vals:
-                    best_idx = max(group_vals, key=lambda x: x[0])[1]
-                    best_indices.add(best_idx)
-        elif metric == "delay_ratio":
-            # Bold closest to 1.0 (most feasible) in Ours groups
+                    best_indices.add(max(group_vals, key=lambda x: x[0])[1])
+        elif metric in ("delay_ratio", "delay_ms", "excess_delay_ms"):
+            # Lower is better (closer to 1.0 for ratio, closest to 0 for excess/delay)
             for group_start in [ours_start, ours_start + len(COMP_KEYS)]:
                 group_vals = []
                 for j in range(len(COMP_KEYS)):
                     try:
-                        group_vals.append((abs(float(cells[group_start + j]) - 1.0),
-                                          group_start + j))
+                        group_vals.append((float(cells[group_start + j]), group_start + j))
                     except ValueError:
                         pass
                 if group_vals:
-                    best_idx = min(group_vals, key=lambda x: x[0])[1]
-                    best_indices.add(best_idx)
+                    best_indices.add(min(group_vals, key=lambda x: x[0])[1])
 
         formatted = []
         for i, c in enumerate(cells):
@@ -318,7 +322,8 @@ def fill_table3_scenario(
 
         metric_label = METRIC_LABELS[metric]
         if is_first:
-            prefix = f"\\multirow{{3}}{{*}}{{\\shortstack[l]{{{scenario}}}}} & {metric_label}"
+            prefix = (f"\\multirow{{{n_rows}}}{{*}}"
+                      f"{{\\shortstack[l]{{{scenario}}}}} & {metric_label}")
             is_first = False
         else:
             prefix = f" & {metric_label}"

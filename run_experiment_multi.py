@@ -918,8 +918,8 @@ def run_simulation(
     acc_hist        = {n: np.full(T, np.nan) for n in algo_names}
     delay_ratio_hist= {n: np.full(T, np.nan) for n in algo_names}
 
-    # Per-task delay: shape (A, T, K)
-    per_task_delay  = {n: np.full((T, K), np.nan) for n in algo_names}
+    # Per-task accuracy: shape (A, T, K)
+    per_task_acc    = {n: np.full((T, K), np.nan) for n in algo_names}
 
     # Per-task eta: shape (A, T, K, L)
     eta_hist        = {n: np.full((T, K, num_links), np.nan) for n in algo_names}
@@ -941,15 +941,27 @@ def run_simulation(
                 allocations = opt.optimize(t=t, c_t=c_t)
 
             if allocations is None:
-                continue
-
-            # Weighted accuracy
-            wsum, wacc = 0.0, 0.0
-            for task in tasks:
-                eta = allocations[task.task_id]["eta"]
-                wacc += float(task.w_k) * float(task.A_k_true(eta))
-                wsum += float(task.w_k)
-                eta_hist[name][t, task.task_id - 1] = np.array(eta, dtype=float)
+                # Infeasible slot: fall back to maximum compression per task.
+                # Same rationale as single-task: ensures all algorithms are
+                # evaluated over the same T slots for fair comparison.
+                allocations = {}
+                for task in tasks:
+                    eta_fb    = np.array(
+                        [task.eta_min[i] for i in range(task.b_k, task.e_k)],
+                        dtype=float
+                    )
+                    allocations[task.task_id] = {
+                        "eta":    eta_fb,
+                        "s_comp": np.ones(task.L_k, dtype=float),
+                        "s_comm": np.ones(task.L_k - 1, dtype=float),
+                    }
+            for k_idx, task in enumerate(tasks):
+                eta    = allocations[task.task_id]["eta"]
+                a_k    = float(task.A_k_true(eta))
+                wacc  += float(task.w_k) * a_k
+                wsum  += float(task.w_k)
+                eta_hist[name][t, task.task_id - 1]    = np.array(eta, dtype=float)
+                per_task_acc[name][t, k_idx]           = a_k
             acc_hist[name][t] = wacc / wsum if wsum > 0 else 0.0
 
             # Per-task and average delay ratio
@@ -984,12 +996,14 @@ def run_simulation(
     per_task_avg    = {n: np.array([np.nanmean(per_task_delay[n][:t+1,:], axis=0) for t in range(T)]) for n in algo_names}
     eta_avg         = {n: np.array([np.nanmean(eta_hist[n][:t+1,:,:], axis=0) for t in range(T)]) for n in algo_names}
 
+    per_task_acc_avg= {n: np.array([np.nanmean(per_task_acc[n][:t+1,:], axis=0) for t in range(T)]) for n in algo_names}
+
     return dict(
         times=times, c_t_hist=c_t_hist,
         acc_hist=acc_hist, delay_ratio_hist=delay_ratio_hist,
-        per_task_delay=per_task_delay,
+        per_task_delay=per_task_delay, per_task_acc=per_task_acc,
         acc_avg=acc_avg, delay_ratio_avg=delay_ratio_avg,
-        per_task_avg=per_task_avg,
+        per_task_avg=per_task_avg, per_task_acc_avg=per_task_acc_avg,
         eta_avg=eta_avg, eta_hist=eta_hist,
         algo_names=algo_names,
     )
@@ -1178,17 +1192,18 @@ def save_results(
 
     np.savez_compressed(
         os.path.join(out_dir, "simulation_results_multi.npz"),
-        times            = hist["times"],
-        c_t_hist         = hist["c_t_hist"],
-        algo_names       = np.array(algo_names, dtype=str),
-        task_ids         = np.array([t.task_id for t in tasks], dtype=int),
-        acc_avg          = np.stack([hist["acc_avg"][n]         for n in algo_names]),
-        delay_ratio_avg  = np.stack([hist["delay_ratio_avg"][n] for n in algo_names]),
-        per_task_avg     = np.stack([hist["per_task_avg"][n]    for n in algo_names]),
-        eta_avg          = np.stack([hist["eta_avg"][n]         for n in algo_names]),
-        acc_hist         = np.stack([hist["acc_hist"][n]        for n in algo_names]),
-        delay_ratio_hist = np.stack([hist["delay_ratio_hist"][n]for n in algo_names]),
-        K                = np.array([K], dtype=int),
+        times               = hist["times"],
+        c_t_hist            = hist["c_t_hist"],
+        algo_names          = np.array(algo_names, dtype=str),
+        task_ids            = np.array([t.task_id for t in tasks], dtype=int),
+        acc_avg             = np.stack([hist["acc_avg"][n]          for n in algo_names]),
+        delay_ratio_avg     = np.stack([hist["delay_ratio_avg"][n]  for n in algo_names]),
+        per_task_avg        = np.stack([hist["per_task_avg"][n]     for n in algo_names]),
+        per_task_acc_avg    = np.stack([hist["per_task_acc_avg"][n] for n in algo_names]),
+        eta_avg             = np.stack([hist["eta_avg"][n]          for n in algo_names]),
+        acc_hist            = np.stack([hist["acc_hist"][n]         for n in algo_names]),
+        delay_ratio_hist    = np.stack([hist["delay_ratio_hist"][n] for n in algo_names]),
+        K                   = np.array([K], dtype=int),
     )
 
 
