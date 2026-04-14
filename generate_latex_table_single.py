@@ -127,17 +127,19 @@ def make_param_label(setting: dict, T: int) -> str:
 
 
 # ── Format one table row ──────────────────────────────────────────────────────
-def fmt_row(name: str, acc: float, delay_ms: float, delay_ratio: float,
-            comp: str, bold: bool) -> str:
+def fmt_row(name: str, acc: float, delay_ms: float, excess_delay_ms: float,
+            delay_ratio: float, comp: str, bold: bool) -> str:
     latex_name, _ = ALGO_LATEX.get(name, (r"\textsf{" + name + "}", False))
     b = r"\textbf" if bold else ""
 
-    acc_str   = f"{b}{{{acc:.4f}}}"   if bold else f"{acc:.4f}"
-    delay_str = f"{b}{{{delay_ms:.2f}}}" if bold else f"{delay_ms:.2f}"
-    dr_str    = f"{b}{{{delay_ratio:.4f}}}" if bold else f"{delay_ratio:.4f}"
-    comp_str  = f"{b}{{{comp}}}"      if bold else comp
+    acc_str    = f"{b}{{{acc:.4f}}}"            if bold else f"{acc:.4f}"
+    delay_str  = f"{b}{{{delay_ms:.2f}}}"       if bold else f"{delay_ms:.2f}"
+    excess_str = f"{b}{{{excess_delay_ms:.2f}}}" if bold else f"{excess_delay_ms:.2f}"
+    dr_str     = f"{b}{{{delay_ratio:.4f}}}"    if bold else f"{delay_ratio:.4f}"
+    comp_str   = f"{b}{{{comp}}}"               if bold else comp
 
-    return f"  {latex_name} & {comp_str} & {acc_str} & {delay_str} & {dr_str} \\\\"
+    return (f"  {latex_name} & {comp_str} & "
+            f"{acc_str} & {delay_str} & {excess_str} & {dr_str} \\\\")
 
 
 def make_caption(setting: dict, T: int, t_actual: int, label: str) -> str:
@@ -398,11 +400,13 @@ def main():
     # ── Build metric dict ─────────────────────────────────────────────────────
     metrics = {}
     for i, name in enumerate(algo_names):
-        acc         = float(acc_avg_arr[i, t_idx])
-        delay_ratio = float(delay_ratio_avg_arr[i, t_idx])
-        delay_ms    = delay_ratio * inv_R * 1000.0
-        comp        = compression_label(setting, name)
+        acc              = float(acc_avg_arr[i, t_idx])
+        delay_ratio      = float(delay_ratio_avg_arr[i, t_idx])
+        delay_ms         = delay_ratio * inv_R * 1000.0
+        excess_delay_ms  = (delay_ratio - 1.0) * inv_R * 1000.0
+        comp             = compression_label(setting, name)
         metrics[name] = dict(acc=acc, delay_ms=delay_ms,
+                             excess_delay_ms=excess_delay_ms,
                              delay_ratio=delay_ratio, comp=comp)
 
     # ── Build table ───────────────────────────────────────────────────────────
@@ -433,12 +437,13 @@ def main():
     table.append(f"\\label{{tab:single:{label}}}")
     table.append(r"\small")
     table.append(r"\resizebox{\columnwidth}{!}{%")
-    table.append(r"\begin{tabular}{@{}ll ccc@{}}")
+    table.append(r"\begin{tabular}{@{}ll cccc@{}}")
     table.append(r"\toprule")
     table.append(
         r"\textbf{Policy} & \textbf{Compression} & "
         r"\textbf{Avg.~Accuracy ($A$)} & "
         r"\textbf{Avg.~Delay (ms)} & "
+        r"\textbf{Excess Delay (ms)} & "
         r"\textbf{Delay Ratio} \\"
     )
     table.append(r"\midrule")
@@ -446,13 +451,13 @@ def main():
     # Baseline rows
     for name in bl_rows:
         m = metrics[name]
-        table.append(fmt_row(name, m["acc"], m["delay_ms"],
+        table.append(fmt_row(name, m["acc"], m["delay_ms"], m["excess_delay_ms"],
                              m["delay_ratio"], m["comp"], bold=False))
 
     # Any extra unknown baselines
     for name in extras:
         m = metrics[name]
-        table.append(fmt_row(name, m["acc"], m["delay_ms"],
+        table.append(fmt_row(name, m["acc"], m["delay_ms"], m["excess_delay_ms"],
                              m["delay_ratio"], m["comp"], bold=False))
 
     table.append(r"\midrule")
@@ -460,7 +465,7 @@ def main():
     # Main algorithm rows
     for name in mn_rows:
         m = metrics[name]
-        table.append(fmt_row(name, m["acc"], m["delay_ms"],
+        table.append(fmt_row(name, m["acc"], m["delay_ms"], m["excess_delay_ms"],
                              m["delay_ratio"], m["comp"], bold=True))
 
     table.append(r"\midrule")

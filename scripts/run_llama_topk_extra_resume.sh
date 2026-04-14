@@ -22,10 +22,10 @@ HOME_DIR=..
 FAST_SAMPLES=50
 FULL_SAMPLES=100
 GRAD_N=5
-SIGMA=0.01
+SIGMA=0.05
 T=50
 
-OUT_DIR="${HOME_DIR}/outputs/single_experiments/group2_rerun5/llama/topk_per_token"
+OUT_DIR="${HOME_DIR}/outputs/single_experiments/group2_upward_run1/llama/topk_per_token"
 
 mkdir -p logs
 
@@ -48,6 +48,8 @@ export LLM_MEASURED_MODEL=llama_3_1_8b
 export LLM_MEASURED_PAYLOAD=prefill_raw
 export LLM_MEASURED_BATCH=1
 export LLM_GRAD_SIGMA=${SIGMA}
+export LLM_GRAD_PROJECT_UPWARD=1   
+export LLM_GRAD_CONE_MARGIN=-0.01
 "
 
 # =============================================================================
@@ -65,8 +67,8 @@ python ${HOME_DIR}/run_experiment.py --backend llm \
     --llm_activation_strategy topk_per_token \
     --llm_model_name meta-llama/Llama-3.1-8B-Instruct \
     --compressor_backend gpu \
-    --eta_min 0.25 \
-    --no_csi_mu 3.0 \
+    --eta_min 0.1 \
+    --no_csi_mu 0.1 \
     --llm_grad_N ${GRAD_N} \
     --c_min 10000000 --c_max 40000000 --T ${T} \
     --baselines none \

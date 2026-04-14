@@ -17,7 +17,7 @@ GRAD_N=5
 SIGMA=0.05
 T=50
 
-OUT_DIR="${HOME_DIR}/outputs/single_experiments/group2_rerun1/llama/llmint8"
+OUT_DIR="${HOME_DIR}/outputs/single_experiments/group2_upward_run3/llama/llmint8"
 
 mkdir -p logs
 
@@ -40,6 +40,8 @@ export LLM_MEASURED_MODEL=llama_3_1_8b
 export LLM_MEASURED_PAYLOAD=prefill_raw
 export LLM_MEASURED_BATCH=1
 export LLM_GRAD_SIGMA=${SIGMA}
+export LLM_GRAD_PROJECT_UPWARD=1   
+export LLM_GRAD_CONE_MARGIN=-0.01   
 "
 
 # =============================================================================
@@ -57,8 +59,8 @@ python ${HOME_DIR}/run_experiment.py --backend llm \
     --llm_activation_strategy llmint8 \
     --llm_model_name meta-llama/Llama-3.1-8B-Instruct \
     --compressor_backend gpu \
-    --eta_min 0.25 \
-    --no_csi_mu 10.0 \
+    --eta_min 0.1 \
+    --no_csi_mu 0.0001 \
     --llm_grad_N ${GRAD_N} \
     --c_min 10000000 --c_max 40000000 --T ${T} \
     --baselines none \

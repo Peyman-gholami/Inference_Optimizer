@@ -45,7 +45,7 @@ EPSILON=0.1
 ETA_MIN=0.125
 
 # Output directory prefix — compression method appended automatically
-OUT_PREFIX="${HOME_DIR}/outputs/single_experiments/group2/resnet"
+OUT_PREFIX="${HOME_DIR}/outputs/single_experiments/group2/resnet_extra"
 
 # Slurm
 TIME_LIMIT="2:00:00"
@@ -121,15 +121,15 @@ python ${HOME_DIR}/run_experiment.py --backend resnet \
 #submit_experiment "transitional"
 
 # ── Channel regime ────────────────────────────────────────────────────────────
-C_MIN=40000;  C_MAX=100000;  R_K=10; submit_experiment "tight"
+#C_MIN=40000;  C_MAX=100000;  R_K=10; submit_experiment "tight"
 #C_MIN=200000; C_MAX=600000;  R_K=10; submit_experiment "loose"
 
 # ── R_k sensitivity (same channel, different throughput demand) ───────────────
 # Increasing R_k moves the feasibility boundary up — same channel becomes tight.
-#C_MIN=60000; C_MAX=300000
+C_MIN=60000; C_MAX=300000
 #R_K=5;  submit_experiment "transitional_Rk5"
 #R_K=20; submit_experiment "transitional_Rk20"
-#R_K=35; submit_experiment "transitional_Rk35"
+R_K=35; submit_experiment "transitional_Rk35"
 
 # ── μ sensitivity ─────────────────────────────────────────────────────────────
 #C_MIN=60000; C_MAX=300000; R_K=10
@@ -139,7 +139,7 @@ C_MIN=40000;  C_MAX=100000;  R_K=10; submit_experiment "tight"
 
 # ── η_min sensitivity ─────────────────────────────────────────────────────────
 #C_MIN=60000; C_MAX=300000; R_K=10; MU=3.0
-#ETA_MIN=0.0;    submit_experiment "transitional_etamin0"
+#ETA_MIN=0.0;    sacct -j <JOBID> --format=JobID,State,ExitCode,MaxRSS,Elapsed "transitional_etamin0"
 #ETA_MIN=0.0625; submit_experiment "transitional_etamin0p0625"
 #ETA_MIN=0.25;   submit_experiment "transitional_etamin0p25"
 #ETA_MIN=0.5;    submit_experiment "transitional_etamin0p5"

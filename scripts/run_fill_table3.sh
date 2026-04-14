@@ -17,9 +17,9 @@ mkdir -p "$(dirname ${OUT_FILE})"
 python ${HOME_DIR}/fill_table3.py \
 \
     --scenario "OF-Vision-TGH" \
-    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet/tight/topk" \
-    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet/tight/quantization" \
-    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet/tight/llmint8" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/tight/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/tight/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/tight/llmint8" \
 \
     --scenario "OF-Vision-TRS" \
     --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional/topk" \
@@ -37,14 +37,14 @@ python ${HOME_DIR}/fill_table3.py \
     --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk5/llmint8" \
 \
     --scenario "OF-Vision-TRK20" \
-    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk20/topk" \
-    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk20/quantization" \
-    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk20/llmint8" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_Rk20/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_Rk20/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_Rk20/llmint8" \
 \
     --scenario "OF-Vision-TRK35" \
-    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk35/topk" \
-    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk35/quantization" \
-    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_Rk35/llmint8" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_Rk35/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_Rk35/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_Rk35/llmint8" \
 \
     --scenario "OF-Vision-MU05" \
     --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_mu0p5/topk" \
@@ -72,9 +72,9 @@ python ${HOME_DIR}/fill_table3.py \
     --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_etamin0p0625/llmint8" \
 \
     --scenario "OF-Vision-EM025" \
-    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_etamin0p25/topk" \
-    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_etamin0p25/quantization" \
-    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet/transitional_etamin0p25/llmint8" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_etamin0p25/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_etamin0p25/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/transitional_etamin0p25/llmint8" \
     --t_idx -1 \
     --out   "${OUT_FILE}"
 
