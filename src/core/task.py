@@ -1,4 +1,4 @@
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 import numpy as np
 
 class InferenceTask:
@@ -13,11 +13,13 @@ class InferenceTask:
         tau: Dict[int, float],
         a: Dict[int, float],
         eta_min: Dict[int, float],
-        R_k_callable: Callable[[int], float],  
+        R_k_callable: Callable,   # signature: (t: int) -> float
+                                  # OR for llmint8: (t: int, c_t: np.ndarray) -> np.ndarray
+                                  # where return is per-link effective R_k array
         w_k: float,
         accuracy_callable: Callable[[np.ndarray], float],
         accuracy_callable_true: Callable[[np.ndarray], float],
-        gradient_callable: Callable[[np.ndarray], np.ndarray] # NEW: Dedicated gradient callable
+        gradient_callable: Callable[[np.ndarray], np.ndarray],
     ):
         # Topology Assignments
         self.task_id = task_id   
@@ -39,11 +41,39 @@ class InferenceTask:
         self._gradient_callable = gradient_callable
         self._accuracy_callable_true = accuracy_callable_true
         
-    def get_R_k(self, t: int) -> float:
+    def get_R_k(self, t: int, c_t: Optional[np.ndarray] = None) -> float:
         """
         Retrieves the target throughput R_k(t) for a specific time slot t.
+
+        For standard strategies, returns a scalar R_k independent of c_t.
+
+        For llmint8, the effective throughput requirement depends on the
+        current channel capacity because the INT8 floor payload occupies
+        a fixed fraction of the channel regardless of eta:
+
+            D_actual = a_i*(1+eta)/(2*c_i)
+                     = a_i*eta/(2*c_i) + a_i/(2*c_i)
+
+        Absorbing the fixed term into the delay target:
+
+            1/R_k_eff = 1/R_k - a_i/(2*c_i)
+            R_k_eff   = R_k / (1 - a_i*R_k/(2*c_i))
+
+        The R_k_callable for llmint8 tasks accepts (t, c_t) and returns
+        this per-link effective R_k array. The caller (optimizer) must
+        pass c_t when calling get_R_k for such tasks.
+
+        If c_t is None and the callable requires it, a static fallback
+        R_k is returned (using c_t = infinity, i.e. no INT8 floor penalty).
         """
-        return self._R_k_callable(t)
+        try:
+            if c_t is not None:
+                return self._R_k_callable(t, c_t)
+            else:
+                return self._R_k_callable(t)
+        except TypeError:
+            # callable only accepts t — return static R_k
+            return self._R_k_callable(t)
 
     def A_k(self, eta_vec: np.ndarray) -> float:
         """

@@ -9,13 +9,14 @@ import torch
 
 from src.core.llm_compression import ActivationCompressionConfig, LLMActivationCompressor
 from src.core.mmlu_eval import MMLUEvalConfig, MMLUEvaluator
-from src.core.toy_A import grad_oracle
+from gradient_oracles import GradientOracle, SteinGradientOracle, \
+    AccuracyPredictor, PredictorGradientOracle
 
 
 @dataclass(frozen=True)
 class LLMBackendConfig:
     model_name: str
-    # magnitude | topk_per_token | random | quantization | llmint8
+    # magnitude | topk_per_token | random | quantization
     activation_strategy: str
     # split mode for choosing hook layer indices: thirds | half
     split_mode: str
@@ -36,6 +37,15 @@ class LLMBackendConfig:
 
     # Tokenizer / model
     max_length: Optional[int] = 1024
+    # Cone projection — applied to gradient before returning
+    # project_upward=True: clamp gradient components to >= -cone_margin
+    # cone_margin=0.0: hard non-negative projection
+    # cone_margin>0.0: soft projection allowing small downward gradients
+    project_upward: bool  = False
+    cone_margin:    float = 0.0
+    # Predictor oracle — if set, use PredictorGradientOracle instead of Stein
+    # Path to a saved AccuracyPredictor (.pt file)
+    predictor_path: Optional[str] = None
 
 
 def _default_subjects() -> tuple[str, ...]:
@@ -99,11 +109,10 @@ class LLMInferenceTaskCallables:
         if config.split_mode == "thirds":
             cut1 = n_layers // 3
             cut2 = (2 * n_layers) // 3
-            split_label = f"thirds ({cut1}/{cut2 - cut1}/{n_layers - cut2})"
         elif config.split_mode == "half":
             cut1 = n_layers // 2
+            # If we still need two cut points, mirror the first to keep eta length = 2.
             cut2 = min(n_layers - 1, cut1 + 1)
-            split_label = "half"
         else:
             raise ValueError(f"Unknown split_mode: {config.split_mode}")
 
@@ -117,13 +126,6 @@ class LLMInferenceTaskCallables:
             random_seed=config.eval_seed,
         )
         self.compressor = LLMActivationCompressor(self.model, activation_cfg)
-
-        print(
-            f"[LLM backend] model={config.model_name}  "
-            f"n_layers={n_layers}  split={split_label}  "
-            f"hooks=[{cut1}, {cut2}]  strategy={config.activation_strategy}",
-            flush=True,
-        )
 
         # Evaluators
         fast_cfg = MMLUEvalConfig(
@@ -143,6 +145,9 @@ class LLMInferenceTaskCallables:
         self.evaluator_fast = MMLUEvaluator(tokenizer=self.tokenizer, config=fast_cfg)
         self.evaluator_full = MMLUEvaluator(tokenizer=self.tokenizer, config=full_cfg)
 
+        # Build gradient oracle once — reused every call to gradient_callable
+        self._oracle = self._build_gradient_oracle()
+
     def _accuracy_for_eta(self, eta_vec: torch.Tensor, *, true: bool) -> float:
         eta_clamped = torch.clamp(eta_vec.to(torch.float32), self.config.eta_min, 1.0)
         self.compressor.set_eta(eta_clamped)
@@ -154,21 +159,34 @@ class LLMInferenceTaskCallables:
         eta = torch.tensor(eta_vec, dtype=torch.float32, device="cpu")
         return float(self._accuracy_for_eta(eta, true=False))
 
-    def gradient_callable(self, eta_vec: np.ndarray) -> np.ndarray:
-        eta = torch.tensor(eta_vec, dtype=torch.float32, device="cpu")
+    def _build_gradient_oracle(self) -> GradientOracle:
+        """
+        Build the gradient oracle according to config.
 
-        def f(e: torch.Tensor) -> torch.Tensor:
-            # Stein oracle expects a torch scalar.
-            acc = self._accuracy_for_eta(e, true=False)
-            return torch.tensor(acc, dtype=torch.float32, device=e.device)
+        Priority:
+          1. PredictorGradientOracle  — if config.predictor_path is set
+          2. SteinGradientOracle      — otherwise (default)
 
-        g = grad_oracle(
-            f,
-            eta,
-            sigma=float(self.config.grad_sigma),
-            N=int(self.config.grad_N),
+        Both respect project_upward and cone_margin.
+        """
+        common = dict(
+            eta_min        = self.config.eta_min,
+            project_upward = self.config.project_upward,
+            cone_margin    = self.config.cone_margin,
         )
-        return g.detach().cpu().numpy()
+        if self.config.predictor_path is not None:
+            predictor = AccuracyPredictor.load(self.config.predictor_path)
+            return PredictorGradientOracle(predictor, **common)
+        else:
+            return SteinGradientOracle(
+                f     = self.accuracy_callable,
+                sigma = float(self.config.grad_sigma),
+                N     = int(self.config.grad_N),
+                **common,
+            )
+
+    def gradient_callable(self, eta_vec: np.ndarray) -> np.ndarray:
+        return self._oracle(eta_vec)
 
     def accuracy_callable_true(self, eta_vec: np.ndarray) -> float:
         eta = torch.tensor(eta_vec, dtype=torch.float32, device="cpu")
@@ -189,6 +207,16 @@ def build_llm_backend_from_env(*, eta_min: float) -> LLMInferenceTaskCallables:
     # Stein oracle params: keep small for runtime feasibility.
     grad_sigma = float(os.environ.get("LLM_GRAD_SIGMA", "0.05"))
     grad_N = int(os.environ.get("LLM_GRAD_N", "3"))
+
+    # Gradient cone projection
+    # LLM_GRAD_PROJECT_UPWARD=1  →  project gradient onto upward cone
+    # LLM_GRAD_CONE_MARGIN=0.05  →  soft cone margin (0 = hard projection)
+    project_upward = os.environ.get("LLM_GRAD_PROJECT_UPWARD", "0") == "1"
+    cone_margin    = float(os.environ.get("LLM_GRAD_CONE_MARGIN", "0.0"))
+
+    # Predictor oracle — if set, replaces Stein entirely
+    # LLM_GRAD_PREDICTOR_PATH=/path/to/predictor.pt
+    predictor_path = os.environ.get("LLM_GRAD_PREDICTOR_PATH", None) or None
 
     subjects_raw = os.environ.get("MMLU_SUBJECTS", "")
     if subjects_raw.strip():
@@ -211,6 +239,9 @@ def build_llm_backend_from_env(*, eta_min: float) -> LLMInferenceTaskCallables:
         eta_min=eta_min,
         grad_sigma=grad_sigma,
         grad_N=grad_N,
+        project_upward=project_upward,
+        cone_margin=cone_margin,
+        predictor_path=predictor_path,
         subjects=subjects,
         fast_samples_per_subject=fast_samples_per_subject,
         full_samples_per_subject=full_samples_per_subject,

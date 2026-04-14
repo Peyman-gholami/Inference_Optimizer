@@ -71,7 +71,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib
@@ -439,6 +439,79 @@ def load_backend(s: ExperimentSetting):
 # Task builder
 # ============================================================================
 
+def _llmint8_correct_a_and_eta_min(
+    a: dict, eta_min: float, is_llmint8: bool
+) -> tuple:
+    """
+    For llmint8 the transmitted payload is a_i*(1+eta)/2 bytes.
+    We rewrite this as a_eff*eta where a_eff = a_i/2, and absorb the
+    constant INT8-floor term a_i/(2c) into the delay target via an
+    effective R_k that depends on c_t each slot (see make_llmint8_R_k_callable).
+
+    This function returns:
+      a_eff    = a_i / 2  (halved payload coefficient)
+      eta_min_eff = max(eta_min, 0.5)  (pure INT8 floor)
+
+    The R_k correction is handled separately by make_llmint8_R_k_callable.
+    """
+    if not is_llmint8:
+        return a, eta_min
+    a_corr       = {k: v / 2.0 for k, v in a.items()}
+    eta_min_corr = max(eta_min, 0.5)
+    print("[build_task] llmint8: a_eff=a/2, eta_min=max(eta_min,0.5)", flush=True)
+    print(f"  a: {[f'{a[k]:.0f}' for k in sorted(a)]} -> "
+          f"{[f'{a_corr[k]:.0f}' for k in sorted(a_corr)]}", flush=True)
+    print(f"  eta_min: {eta_min} -> {eta_min_corr}", flush=True)
+    return a_corr, eta_min_corr
+
+
+def make_llmint8_R_k_callable(
+    R_k: float,
+    a:   dict,
+) -> Callable:
+    """
+    Build R_k_callable for llmint8 that corrects for the INT8 floor.
+
+    The actual delay for llmint8 is:
+        D = a_i*(1+eta)/(2*c_i) = (a_i/2)*eta/c_i + a_i/(2*c_i)
+                                 = a_eff*eta/c_i  +  floor_i(c_i)
+
+    Absorbing the floor into the target:
+        D - 1/R_k = a_eff*eta/c_i - [1/R_k - a_i/(2*c_i)]
+                  = a_eff*eta/c_i - 1/R_k_eff_i(c_i)
+
+    where:
+        1/R_k_eff_i = 1/R_k - a_i/(2*c_i)
+        R_k_eff_i   = R_k / (1 - a_i*R_k/(2*c_i))
+
+    Returns a callable (t, c_t) -> float  (scalar, using link 0 as bottleneck)
+    or per-link array if needed.
+
+    If 1/R_k - a_i/(2*c_i) <= 0 for any link, the constraint is infeasible
+    regardless of eta (INT8 floor alone exceeds target delay) — returns inf.
+    """
+    a_fp16 = {k: v * 2.0 for k, v in a.items()}  # recover original a from a_eff=a/2
+
+    def R_k_callable(t: int, c_t: np.ndarray = None) -> float:
+        if c_t is None:
+            # Static fallback — ignore floor correction
+            return R_k
+        # Per-link effective R_k: use minimum (most constraining link)
+        R_eff_vals = []
+        for i, c_i in enumerate(c_t):
+            a_i     = a_fp16.get(i, list(a_fp16.values())[0])
+            inv_R   = 1.0 / R_k
+            floor_i = a_i / (2.0 * c_i) if c_i > 0 else float("inf")
+            slack   = inv_R - floor_i
+            if slack <= 0:
+                return float("inf")   # infeasible — floor exceeds target
+            R_eff_vals.append(1.0 / slack)
+        # Return the minimum effective R_k (tightest constraint across links)
+        return float(min(R_eff_vals))
+
+    return R_k_callable
+
+
 def build_task(s: ExperimentSetting, api) -> InferenceTask:
     """
     Build an InferenceTask from the api and setting.
@@ -447,15 +520,20 @@ def build_task(s: ExperimentSetting, api) -> InferenceTask:
     """
     from src.core.llm_plug_in import is_resnet_backend
 
-    R_k_callable = lambda t, r=s.R_k: r
-
     if is_resnet_backend():
         num_links = api.num_links
         num_nodes = num_links + 1
         raw_a     = api.measured_a()
         a         = {i: float(raw_a[i]) for i in range(num_links)}
         tau       = {i: 0.001 for i in range(num_nodes)}
-        eta_min_d = {i: s.eta_min for i in range(num_links)}
+
+        is_llmint8 = (s.compressor.lower() == "llmint8")
+        a, eta_min_eff = _llmint8_correct_a_and_eta_min(a, s.eta_min, is_llmint8)
+        eta_min_d  = {i: eta_min_eff for i in range(num_links)}
+        if is_llmint8:
+            R_k_callable = make_llmint8_R_k_callable(s.R_k, a)
+        else:
+            R_k_callable = lambda t, *_, r=s.R_k: r
 
         s.num_links        = num_links
         s.L_k              = num_nodes
@@ -483,14 +561,21 @@ def build_task(s: ExperimentSetting, api) -> InferenceTask:
     if measured is not None:
         tau, a = measured
     else:
-        # MLP defaults: activations are [batch,128] and [batch,64] at FP32
-        # Use per-sample byte sizes: 128*4=512, 64*4=256
         tau = {0: 0.01, 1: 0.01, 2: 0.01}
         a   = {0: 512.0, 1: 256.0}
 
+    is_llmint8 = (s.llm_activation_strategy.lower() == "llmint8")
+    a, eta_min_eff = _llmint8_correct_a_and_eta_min(
+        {k: float(v) for k, v in a.items()}, s.eta_min, is_llmint8
+    )
+    if is_llmint8:
+        R_k_callable = make_llmint8_R_k_callable(s.R_k, a)
+    else:
+        R_k_callable = lambda t, *_, r=s.R_k: r
+
     num_links = 2
     num_nodes = 3
-    eta_min_d = {0: s.eta_min, 1: s.eta_min}
+    eta_min_d = {0: eta_min_eff, 1: eta_min_eff}
 
     s.num_links        = num_links
     s.L_k              = num_nodes
@@ -765,14 +850,39 @@ def run_simulation(
                 allocations = opt.optimize(t=t, c_t=c_t)
 
             if allocations is None:
-                continue
+                # Infeasible slot: fall back to maximum compression (η = η_min).
+                # This ensures all algorithms are evaluated over the same T slots
+                # so cumulative averages are comparable. Without this, CSI-aware
+                # would silently skip infeasible slots and nanmean over a smaller
+                # subset, making its delay average appear lower than baselines
+                # that always return an allocation.
+                eta_fallback = np.array(
+                    [task.eta_min[i] for i in range(task.b_k, task.e_k)],
+                    dtype=float
+                )
+                s_comp_fb = np.ones(task.L_k, dtype=float)
+                s_comm_fb = np.ones(task.L_k - 1, dtype=float)
+                allocations = {
+                    task.task_id: {
+                        "eta":    eta_fallback,
+                        "s_comp": s_comp_fb,
+                        "s_comm": s_comm_fb,
+                    }
+                }
 
             eta = allocations[task.task_id]["eta"]
             acc_hist[name][t] = float(task.A_k_true(eta))
 
             residuals = opt.compute_residual_delay(t, allocations, c_t)
             residual  = float(residuals[task.task_id])
-            R_k       = float(task.get_R_k(t))
+            R_k       = float(task.get_R_k(t, c_t))
+
+            # R_k = inf means the llmint8 INT8 floor alone exceeds the delay
+            # target at this channel realisation (structurally infeasible slot).
+            # Fall back to the static nominal R_k so delay metrics remain finite.
+            if not np.isfinite(R_k):
+                R_k = float(task.get_R_k(t))   # c_t=None → static fallback
+
             inv_R     = 1.0 / R_k
             delay     = residual + inv_R
             delay_ratio_hist[name][t] = delay / inv_R
@@ -780,7 +890,7 @@ def run_simulation(
             eta_hist[name][t] = np.array(eta, dtype=float)
 
             if name == "No-CSI (Alg1) + LCB(90%)":
-                opt.update_dual(t=t, actual_delays={task.task_id: delay})
+                opt.update_dual(t=t, actual_delays={task.task_id: delay}, c_t=c_t)
                 _lambda_t[0] = opt.lambda_t   # track for checkpoint
 
         lcb.update(c_t)

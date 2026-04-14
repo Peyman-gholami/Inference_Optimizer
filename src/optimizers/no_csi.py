@@ -87,13 +87,15 @@ class NoCSISingleTaskOptimizer(BaseOptimizer):
             }
         })
 
-    def update_dual(self, t: int, actual_delays: Dict[int, float]):
+    def update_dual(self, t: int, actual_delays: Dict[int, float],
+                    c_t: np.ndarray = None):
         """Dual Step: Update the multiplier [cite: 258-259]."""
         task = self.tasks[0]
         if task.task_id in actual_delays:
             D_act = actual_delays[task.task_id]
-            R_t = task.get_R_k(t)
-            self.lambda_t = max(self.epsilon, self.lambda_t + D_act - (1.0 / R_t))
+            R_t   = task.get_R_k(t, c_t)
+            self.lambda_t = max(self.epsilon,
+                                self.lambda_t + D_act - (1.0 / R_t))
 
 
 class NoCSIMultiTaskOptimizer(BaseOptimizer):
@@ -234,10 +236,14 @@ class NoCSIMultiTaskOptimizer(BaseOptimizer):
             }
         return self.scale_allocations_to_unit_sum(final_allocations)
 
-    def update_dual(self, t: int, actual_delays: Dict[int, float]):
+    def update_dual(self, t: int, actual_delays: Dict[int, float],
+                    c_t: np.ndarray = None):
         """Dual Step: Update queues for active tasks [cite: 346-349]."""
         for task in self.tasks:
             if task.task_id in actual_delays:
                 D_act = actual_delays[task.task_id]
-                R_t = task.get_R_k(t)
-                self.lambda_k[task.task_id] = max(self.epsilon, self.lambda_k[task.task_id] + D_act - (1.0 / R_t))
+                R_t   = task.get_R_k(t, c_t)
+                self.lambda_k[task.task_id] = max(
+                    self.epsilon,
+                    self.lambda_k[task.task_id] + D_act - (1.0 / R_t)
+                )

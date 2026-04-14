@@ -176,9 +176,7 @@ class UniformCompressionSingleTaskBaseline(BaseOptimizer):
 
     def optimize(self, t: int, c_t: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
         task: InferenceTask = self.tasks[0]
-        R_t = task.get_R_k(t)
-
-        # Compute the unconstrained uniform compression level from instantaneous CSI.
+        R_t = task.get_R_k(t, c_t)
         ratios = [
             c_t[i] / (R_t * task.a[i]) for i in range(task.b_k, task.e_k)
         ]
@@ -220,7 +218,7 @@ class EstimatedCSICompressionSingleTaskBaseline(BaseOptimizer):
         self, t: int, c_hat: np.ndarray
     ) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
         task: InferenceTask = self.tasks[0]
-        R_t = task.get_R_k(t)
+        R_t = task.get_R_k(t, c_hat)
 
         links = list(range(task.b_k, task.e_k))
         eta = np.array(
@@ -353,7 +351,7 @@ class StaticEqualShareMultiTaskBaseline(BaseOptimizer):
         tasks_on_link = {i: _active_tasks_on_link(self.tasks, i) for i in range(self.M - 1)}
 
         for task in self.tasks:
-            R_k = task.get_R_k(t)
+            R_k = task.get_R_k(t, c_t)
 
             # Compute shares per node on the task path
             s_comp = np.zeros(task.L_k, dtype=float)
@@ -398,7 +396,7 @@ class ProportionalResourceAllocationMultiTaskBaseline(BaseOptimizer):
         }
 
         for task in self.tasks:
-            R_k = task.get_R_k(t)
+            R_k = task.get_R_k(t, c_t)
 
             s_comp = np.zeros(task.L_k, dtype=float)
             for local_idx, node_i in enumerate(range(task.b_k, task.e_k + 1)):
@@ -432,7 +430,7 @@ class StrictPriorityGreedyMultiTaskBaseline(BaseOptimizer):
 
         # Base compute: s_{i,k}^{comp} = tau_{i,k} * R_k(t)
         for task in self.tasks:
-            R_k = task.get_R_k(t)
+            R_k = task.get_R_k(t, c_t)
             s_comp_map[task.task_id] = np.array(
                 [float(task.tau[i]) * float(R_k) for i in range(task.b_k, task.e_k + 1)],
                 dtype=float,
@@ -485,7 +483,7 @@ class StrictPriorityGreedyMultiTaskBaseline(BaseOptimizer):
             for task in tasks_by_weight:
                 if not task.is_active_on_link(link_i) or rem <= 0:
                     continue
-                R_k = task.get_R_k(t)
+                R_k = task.get_R_k(t, c_t)
                 base = float(s_comm_map[task.task_id][link_i - task.b_k])
                 # Extra needed to reach eta=1:
                 target = (float(task.a[link_i]) * float(R_k)) / float(c_t[link_i])
@@ -497,7 +495,7 @@ class StrictPriorityGreedyMultiTaskBaseline(BaseOptimizer):
         # Pack final allocations (derive eta from assigned comm shares)
         allocations: Dict[int, Dict[str, np.ndarray]] = {}
         for task in self.tasks:
-            R_k = task.get_R_k(t)
+            R_k = task.get_R_k(t, c_t)
             s_comp = s_comp_map[task.task_id]
             s_comm = s_comm_map[task.task_id]
             eta = np.array(
@@ -570,14 +568,16 @@ class DecoupledEqualSplitStochasticDescentMultiTaskBaseline(BaseOptimizer):
 
         return self.scale_allocations_to_unit_sum(allocations)
 
-    def update_dual(self, t: int, actual_delays: Dict[int, float]):
+    def update_dual(self, t: int, actual_delays: Dict[int, float],
+                    c_t: np.ndarray = None):
         for task in self.tasks:
             tid = task.task_id
             if tid not in actual_delays:
                 continue
             D_act = float(actual_delays[tid])
-            R_t = float(task.get_R_k(t))
-            self.lambda_k[tid] = max(self.epsilon, float(self.lambda_k[tid]) + D_act - (1.0 / R_t))
+            R_t   = float(task.get_R_k(t, c_t))
+            self.lambda_k[tid] = max(self.epsilon,
+                                     float(self.lambda_k[tid]) + D_act - (1.0 / R_t))
 
 
 class QueueProportionalHeuristicMultiTaskBaseline(BaseOptimizer):
@@ -658,14 +658,16 @@ class QueueProportionalHeuristicMultiTaskBaseline(BaseOptimizer):
 
         return self.scale_allocations_to_unit_sum(allocations)
 
-    def update_dual(self, t: int, actual_delays: Dict[int, float]):
+    def update_dual(self, t: int, actual_delays: Dict[int, float],
+                    c_t: np.ndarray = None):
         for task in self.tasks:
             tid = task.task_id
             if tid not in actual_delays:
                 continue
             D_act = float(actual_delays[tid])
-            R_t = float(task.get_R_k(t))
-            self.lambda_k[tid] = max(self.epsilon, float(self.lambda_k[tid]) + D_act - (1.0 / R_t))
+            R_t   = float(task.get_R_k(t, c_t))
+            self.lambda_k[tid] = max(self.epsilon,
+                                     float(self.lambda_k[tid]) + D_act - (1.0 / R_t))
 
 
 class HistoricalAverageCertaintyEquivalenceMultiTaskBaseline(BaseOptimizer):

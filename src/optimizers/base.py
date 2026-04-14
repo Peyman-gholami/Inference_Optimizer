@@ -141,7 +141,7 @@ class BaseOptimizer(ABC):
 
         for task in self.tasks:
             tid = task.task_id
-            R_t = task.get_R_k(t)
+            R_t = task.get_R_k(t, c_t)
 
             if tid not in allocations:
                 raise KeyError(f"Missing allocations for task_id={tid}.")

@@ -13,7 +13,7 @@ class CSIAwareSingleTaskOptimizer(BaseOptimizer):
     def check_feasibility(self, t: int, c_t: np.ndarray) -> bool:
         """Implements Lemma 3.1 (Single-Task Feasibility Condition)[cite: 88]."""
         task = self.tasks[0]
-        R_t = task.get_R_k(t)
+        R_t = task.get_R_k(t, c_t)
 
         # [cite_start]Condition 3: Check computation delay bounds [cite: 90]
         if any(task.tau[i] > 1.0 / R_t for i in range(task.b_k, task.e_k + 1)):
@@ -31,7 +31,7 @@ class CSIAwareSingleTaskOptimizer(BaseOptimizer):
             return None
 
         task = self.tasks[0]
-        R_t = task.get_R_k(t)
+        R_t = task.get_R_k(t, c_t)
 
         # [cite_start]Apply Theorem 3.2: \eta_i^*(t) = min(1, c_i(t) / (R(t) * a_i)) [cite: 106]
         eta = np.array([min(1.0, c_t[i] / (R_t * task.a[i])) for i in range(task.b_k, task.e_k)])
@@ -54,14 +54,14 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         """Implements Lemma 3.3 (Multi-Task Feasibility Condition)[cite: 157]."""
         # Condition (14): Check computation sums at every node [cite: 158]
         for i in range(self.M):
-            comp_sum = sum(task.tau[i] * task.get_R_k(t) for task in self.tasks if task.is_active_at_node(i))
+            comp_sum = sum(task.tau[i] * task.get_R_k(t, c_t) for task in self.tasks if task.is_active_at_node(i))
             if comp_sum > 1.0:
                 return False
 
         # Condition (15): Check communication sums at every link [cite: 159]
         for i in range(self.M - 1):
             comm_sum = sum(
-                (task.a[i] * task.eta_min[i] * task.get_R_k(t)) / c_t[i]
+                (task.a[i] * task.eta_min[i] * task.get_R_k(t, c_t)) / c_t[i]
                 for task in self.tasks if task.is_active_on_link(i)
             )
             if comm_sum > 1.0:
@@ -77,7 +77,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         """Maps active task-link pairs to a flat list to interface with SciPy's 1D arrays."""
         context = []
         for task in self.tasks:
-            R_k = task.get_R_k(t)
+            R_k = task.get_R_k(t, c_t)
             for i in range(task.b_k, task.e_k):
                 beta = c_t[i] / (R_k * task.a[i]) # Derivative term [cite: 208]
                 
@@ -166,7 +166,7 @@ class CSIAwareMultiTaskOptimizer(BaseOptimizer):
         """Unpacks the optimized 1D array back into the final operational dictionary."""
         final_allocations = {}
         for task in self.tasks:
-            R_k = task.get_R_k(t)
+            R_k = task.get_R_k(t, c_t)
             
             # Compute shares are decoupled and set directly based on QoS [cite: 189]
             s_comp = np.array([task.tau[i] * R_k for i in range(task.b_k, task.e_k + 1)])

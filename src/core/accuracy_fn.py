@@ -139,7 +139,15 @@ def _compress_decompress(compressor, x: torch.Tensor, eta: float) -> torch.Tenso
     # Build compression_params depending on compressor type
     name = compressor.get_name().lower() if hasattr(compressor, 'get_name') else ''
     if 'llmint8' in name or 'llm' in name:
-        params = [eta, 'fp16', 'int8']
+        # η_optimizer ∈ [0.5, 1] represents the effective payload fraction:
+        #   transmitted_bytes = a_i × η_optimizer
+        #   = a_i × (1 + outlier_ratio) / 2
+        # → outlier_ratio = 2 × η_optimizer - 1 ∈ [0, 1]
+        # This ensures the optimizer's delay model a_i × η / c is correct.
+        # η_optimizer < 0.5 is infeasible (pure INT8 is the floor) and is
+        # clamped to 0 outlier_ratio (pure INT8).
+        outlier_ratio = max(0.0, min(1.0, 2.0 * eta - 1.0))
+        params = [outlier_ratio, 'fp16', 'int8']
     else:
         params = eta
 
