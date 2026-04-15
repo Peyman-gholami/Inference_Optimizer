@@ -19,9 +19,11 @@ MODEL="meta-llama/Llama-3.1-8B-Instruct"
 
 C_MIN=10000000
 C_MAX=40000000
+
 R_K=10
 T=50
 ETA_MIN=0.1
+N_SHOT=5
 
 # No-CSI — per-strategy mu (scaled to accuracy range)
 # These are set per-strategy inside submit_experiment()
@@ -38,9 +40,9 @@ PREDICTOR_DIR="${HOME_DIR}/models/predictors"
 PROJECT_UPWARD=1
 CONE_MARGIN=-0.01   # 0 = hard projection; >0 = soft (e.g. 0.02)
 
-OUT_PREFIX="${HOME_DIR}/outputs/single_experiments/group2_predictor/llama"
+OUT_PREFIX="${HOME_DIR}/outputs/single_experiments/group2_predictor/run1"
 
-TIME_LIMIT="4:00:00"
+TIME_LIMIT="8:00:00"
 MEM="48G"
 
 # =============================================================================
@@ -72,6 +74,7 @@ export LLM_MEASURED_BATCH=1
 export LLM_GRAD_N=${GRAD_N}
 export LLM_GRAD_PROJECT_UPWARD=${PROJECT_UPWARD}
 export LLM_GRAD_CONE_MARGIN=${CONE_MARGIN}
+export MMLU_N_SHOT=${N_SHOT}
 "
 
 # =============================================================================
@@ -138,14 +141,19 @@ echo "PREDICTOR_DIR=${PREDICTOR_DIR}"
 # ── topk_per_token ────────────────────────────────────────────────────────────
 submit_experiment \
     "topk_per_token" \
-    "${PREDICTOR_DIR}/llama_topk_per_token_etamin0.0_grid15.pt" \
-    0.1
+    "${PREDICTOR_DIR}/llama_topk_per_token_etamin0.1_grid10_5shot.pt" \
+    0.000001
 
 # ── quantization ─────────────────────────────────────────────────────────────
-#submit_experiment \
-#    "quantization" \
-#    "${PREDICTOR_DIR}/llama_quantization_etamin0.0_grid20.pt" \
-#    0.5
+submit_experiment \
+    "quantization" \
+    "${PREDICTOR_DIR}/llama_quantization_etamin0.1_grid12_5shot.pt" \
+    0.000001
+
+submit_experiment \
+     "llmint8" \
+     "${PREDICTOR_DIR}/llama_llmint8_etamin0.1_grid10_5shot.pt" \
+    0.000001
 
 # ── Add more strategies here once predictors are trained ─────────────────────
 # submit_experiment \
