@@ -256,6 +256,7 @@ def _run_partitioned(
                         params = [eta, 'fp16', 'int8']
                     else:
                         params = eta
+                    
 
                     if _is_gpu_compressor(compressor):
                         # GPU-native path — tensor stays on device throughout

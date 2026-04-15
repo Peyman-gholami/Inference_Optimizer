@@ -337,10 +337,10 @@ class GPUQuantizationCompressor(GPUBaseCompressor):
         self._int2 = _GPUQuanInt2()
 
     def _select(self, k: float):
-        if   abs(k - 0.0625) < 1e-6: return self._int2
-        elif abs(k - 0.125)  < 1e-6: return self._int4
-        elif abs(k - 0.25)   < 1e-6: return self._int8
-        elif abs(k - 0.5)    < 1e-6: return self._fp16
+        if   k < 0.0625+ 1e-6: return self._int2
+        elif k < 0.125+1e-6: return self._int4
+        elif k < 0.25+1e-6: return self._int8
+        elif k < 0.5+1e-6: return self._fp16
         else:                         return self._fp16
 
     def _dispatch(self, data: dict):
@@ -351,6 +351,7 @@ class GPUQuantizationCompressor(GPUBaseCompressor):
         else:                      return self._fp16
 
     def compress(self, tensor: torch.Tensor, compression_params) -> dict:
+        #TT
         return self._select(float(compression_params)).compress(tensor, compression_params)
 
     def decompress(self, compressed: dict, device=None) -> torch.Tensor:

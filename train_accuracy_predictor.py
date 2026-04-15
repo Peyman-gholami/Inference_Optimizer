@@ -78,6 +78,9 @@ def main():
     p.add_argument("--full_samples",type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=8)
     p.add_argument("--seed",        type=int,   default=0)
+    p.add_argument("--n_shot",      type=int,   default=0,
+                   help="Number of few-shot examples (0=zero-shot, 5=standard 5-shot). "
+                        "Must match MMLU_N_SHOT used at experiment time.")
     args = p.parse_args()
 
     # ── Set env vars for backend ──────────────────────────────────────────────
@@ -89,6 +92,7 @@ def main():
     _os.environ["MMLU_FULL_SAMPLES_PER_SUBJECT"] = str(args.full_samples)
     _os.environ["MMLU_BATCH_SIZE"]              = str(args.batch_size)
     _os.environ["MMLU_SEED"]                    = str(args.seed)
+    _os.environ["MMLU_N_SHOT"]                  = str(args.n_shot)
     _os.environ["INFERENCE_OPTIMIZER_BACKEND"]  = "llm"
     _os.environ.setdefault("LLM_USE_MEASURED_TAU_A", "1")
 
@@ -107,7 +111,8 @@ def main():
     if args.save_path is None:
         model_short  = args.model_name.split("/")[-1].replace("-", "_").lower()
         args.save_path = (f"models/predictor_{model_short}_{args.strategy}"
-                          f"_etamin{args.eta_min}_grid{args.n_grid}.pt")
+                          f"_etamin{args.eta_min}_grid{args.n_grid}"
+                          f"_{args.n_shot}shot.pt")
     os.makedirs(os.path.dirname(args.save_path)
                 if os.path.dirname(args.save_path) else ".",
                 exist_ok=True)
@@ -131,25 +136,109 @@ def main():
         grid_eta_min = args.grid_eta_min,
     )
 
-    # ── Quick validation ──────────────────────────────────────────────────────
-    import numpy as np
-    print("\n[validation] Predictor vs A_true at a few test points:", flush=True)
-    test_etas = [
-        np.array([args.eta_min, args.eta_min]),
+    # ── Held-out evaluation ───────────────────────────────────────────────────
+    # Evaluate on a separate held-out grid (different points from training grid)
+    # to get unbiased estimates of RMSE, R², and MAE.
+    print("\n" + "="*60, flush=True)
+    print("[validation] Held-out evaluation on fresh grid points", flush=True)
+    print("="*60, flush=True)
+
+    # Build held-out grid at n_grid+1 points (offset so they fall between
+    # training points and are never seen during fitting)
+    n_held = max(8, args.n_grid - 2)
+    held_lo = args.grid_eta_min
+    axes_held = [np.linspace(held_lo + 0.5/(n_held-1), 1.0 - 0.5/(n_held-1),
+                             n_held)
+                 for _ in range(2)]
+    grids_held  = np.meshgrid(*axes_held, indexing="ij")
+    eta_held    = np.stack([g.flatten() for g in grids_held], axis=1)
+
+    print(f"  Evaluating {len(eta_held)} held-out points ...", flush=True)
+
+    a_true_vals = []
+    a_pred_vals = []
+    for eta_vec in eta_held:
+        a_true_vals.append(float(api.accuracy_callable_true(eta_vec)))
+        a_pred_vals.append(float(predictor.predict(eta_vec)))
+
+    a_true_arr = np.array(a_true_vals)
+    a_pred_arr = np.array(a_pred_vals)
+
+    residuals   = a_pred_arr - a_true_arr
+    rmse        = float(np.sqrt(np.mean(residuals**2)))
+    mae         = float(np.mean(np.abs(residuals)))
+    ss_res      = float(np.sum(residuals**2))
+    ss_tot      = float(np.sum((a_true_arr - a_true_arr.mean())**2))
+    r2          = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else float("nan")
+    max_err     = float(np.max(np.abs(residuals)))
+    bias        = float(np.mean(residuals))   # signed: + = over-predicts
+
+    print(f"\n  Held-out metrics ({len(eta_held)} points):", flush=True)
+    print(f"    RMSE     = {rmse:.6f}", flush=True)
+    print(f"    MAE      = {mae:.6f}", flush=True)
+    print(f"    Max err  = {max_err:.6f}", flush=True)
+    print(f"    Bias     = {bias:+.6f}  (+ = over-predicts, - = under-predicts)", flush=True)
+    print(f"    R²       = {r2:.6f}  (1.0 = perfect fit)", flush=True)
+
+    # Accuracy range on held-out set (sanity check of landscape coverage)
+    a_range = float(a_true_arr.max() - a_true_arr.min())
+    print(f"    A_true range = [{a_true_arr.min():.4f}, {a_true_arr.max():.4f}]"
+          f"  (range={a_range:.4f})", flush=True)
+    print(f"    A_pred range = [{a_pred_arr.min():.4f}, {a_pred_arr.max():.4f}]",
+          flush=True)
+
+    # Relative RMSE as fraction of accuracy range (most interpretable metric)
+    if a_range > 1e-6:
+        rel_rmse = rmse / a_range
+        print(f"    Rel. RMSE    = {rel_rmse:.3f}  "
+              f"(RMSE / A_range, lower is better)", flush=True)
+
+    # Monotonicity check: fraction of held-out pairs where predictor
+    # respects the correct ordering (A(η_high) >= A(η_low))
+    print(f"\n  Monotonicity check:", flush=True)
+    n_pairs   = 0
+    n_correct = 0
+    rng_check = np.random.default_rng(42)
+    sample_idx = rng_check.choice(len(eta_held),
+                                   size=min(500, len(eta_held)),
+                                   replace=False)
+    for i in sample_idx:
+        for j in sample_idx:
+            if i >= j:
+                continue
+            # Check if eta_held[i] <= eta_held[j] componentwise
+            if np.all(eta_held[i] <= eta_held[j]) and not np.all(eta_held[i] == eta_held[j]):
+                n_pairs += 1
+                if a_pred_arr[i] <= a_pred_arr[j]:
+                    n_correct += 1
+    if n_pairs > 0:
+        mono_frac = n_correct / n_pairs
+        print(f"    {n_correct}/{n_pairs} ordered pairs correct  "
+              f"({mono_frac*100:.1f}%)", flush=True)
+    else:
+        print("    (no ordered pairs found in sample)", flush=True)
+
+    # Per-point breakdown at key eta values
+    print(f"\n  Point-by-point at key eta values:", flush=True)
+    key_etas = [
+        np.array([args.grid_eta_min, args.grid_eta_min]),
+        np.array([0.25, 0.25]),
         np.array([0.5, 0.5]),
         np.array([0.75, 0.75]),
         np.array([1.0, 1.0]),
     ]
-    for eta_vec in test_etas:
-        eta_vec = np.clip(eta_vec, args.eta_min, 1.0)
-        a_true  = api.accuracy_callable_true(eta_vec)
-        a_pred  = predictor.predict(eta_vec)
-        g       = predictor.gradient(eta_vec)
-        print(f"  eta={np.round(eta_vec, 2)}  "
-              f"A_true={a_true:.4f}  A_pred={a_pred:.4f}  "
-              f"grad={np.round(g, 4)}", flush=True)
+    for eta_vec in key_etas:
+        eta_vec = np.clip(eta_vec, args.grid_eta_min, 1.0)
+        a_t = float(api.accuracy_callable_true(eta_vec))
+        a_p = float(predictor.predict(eta_vec))
+        g   = predictor.gradient(eta_vec)
+        err = a_p - a_t
+        print(f"    eta={np.round(eta_vec, 2)}  "
+              f"A_true={a_t:.4f}  A_pred={a_p:.4f}  "
+              f"err={err:+.4f}  grad={np.round(g, 4)}", flush=True)
 
     print(f"\nPredictor saved to: {args.save_path}", flush=True)
+    print("="*60, flush=True)
 
 
 if __name__ == "__main__":

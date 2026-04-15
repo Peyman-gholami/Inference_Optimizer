@@ -34,6 +34,9 @@ class LLMBackendConfig:
     full_samples_per_subject: int
     batch_size: int
     eval_seed: int
+    # Few-shot evaluation: 0 = zero-shot (default), 5 = standard 5-shot.
+    # Examples are drawn from the MMLU dev split (5 per subject).
+    n_shot: int = 0
 
     # Tokenizer / model
     max_length: Optional[int] = 1024
@@ -134,6 +137,7 @@ class LLMInferenceTaskCallables:
             seed=config.eval_seed,
             max_length=config.max_length,
             batch_size=config.batch_size,
+            n_shot=config.n_shot,
         )
         full_cfg = MMLUEvalConfig(
             subjects=config.subjects,
@@ -141,6 +145,7 @@ class LLMInferenceTaskCallables:
             seed=config.eval_seed + 1,
             max_length=config.max_length,
             batch_size=config.batch_size,
+            n_shot=config.n_shot,
         )
         self.evaluator_fast = MMLUEvaluator(tokenizer=self.tokenizer, config=fast_cfg)
         self.evaluator_full = MMLUEvaluator(tokenizer=self.tokenizer, config=full_cfg)
@@ -228,7 +233,8 @@ def build_llm_backend_from_env(*, eta_min: float) -> LLMInferenceTaskCallables:
     full_samples_per_subject = int(os.environ.get("MMLU_FULL_SAMPLES_PER_SUBJECT", "10"))
 
     batch_size = int(os.environ.get("MMLU_BATCH_SIZE", "8"))
-    eval_seed = int(os.environ.get("MMLU_SEED", "0"))
+    eval_seed  = int(os.environ.get("MMLU_SEED", "0"))
+    n_shot     = int(os.environ.get("MMLU_N_SHOT", "5"))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -247,6 +253,7 @@ def build_llm_backend_from_env(*, eta_min: float) -> LLMInferenceTaskCallables:
         full_samples_per_subject=full_samples_per_subject,
         batch_size=batch_size,
         eval_seed=eval_seed,
+        n_shot=n_shot,
     )
     return LLMInferenceTaskCallables(config=cfg, device=device)
 
