@@ -248,11 +248,13 @@ def run_compare(
                 allocations = opt.optimize(t=t, c_t=c_t)
 
             # In this comparison we don't expect None, but be robust.
+            print(f"algo: {name}, allocations: {allocations}")
             if allocations is None:
                 continue
 
             acc_hist[name][t] = _compute_accuracy(task, allocations)
             delay, excess_delay = _compute_delay_and_excess(opt, task, t, allocations, c_t)
+            print(f"algo: {name}, delay: {delay}, excess_delay: {excess_delay}")
             excess_delay_hist[name][t] = excess_delay
             eta_hist[name][t, :] = np.array(allocations[task.task_id]["eta"], dtype=float)
 
@@ -471,7 +473,7 @@ def main() -> None:
     p.add_argument(
         "--mu",
         type=float,
-        default=6.0,
+        default=10.0,
         help="No-CSI (Alg1) parameter mu.",
     )
     p.add_argument(

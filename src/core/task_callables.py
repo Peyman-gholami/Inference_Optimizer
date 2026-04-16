@@ -5,6 +5,8 @@ wrapping AccuracyFunction and the Stein gradient oracle.
 Both callables accept and return np.ndarray as required by InferenceTask.
 """
 
+from typing import Optional
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -26,7 +28,10 @@ class InferenceTaskCallables:
     test_loader : DataLoader       -- for accuracy evaluation
     sigma       : float            -- Stein smoothing scale for gradient oracle
     N           : int              -- number of Stein samples
-    n_samples   : int or None      -- test subset size (None = full test set)
+    n_samples   : int or None      -- test subset size for accuracy_callable
+                                      (None = full test set)
+    n_samples_true : int or None   -- test subset for accuracy_callable_true
+                                      (None = full test set)
     flat_theta  : Tensor or None   -- fixed theta to evaluate at.
                                       If None, uses model's current weights.
     device      : torch.device
@@ -49,6 +54,7 @@ class InferenceTaskCallables:
     def __init__(self, cm: CompressedModel, test_loader: DataLoader,
                  sigma: float = 0.05, N: int = 50,
                  n_samples: int = 512,
+                 n_samples_true: Optional[int] = None,
                  flat_theta: torch.Tensor = None,
                  device=None):
         self.cm          = cm
@@ -61,7 +67,7 @@ class InferenceTaskCallables:
                                   n_samples=n_samples, device=self.device)
 
         self.A_true = AccuracyFunction(cm, test_loader,
-                                  n_samples=None, device=self.device)
+                                  n_samples=n_samples_true, device=self.device)
 
     # ── internal torch-level calls ────────────────────────────────
 

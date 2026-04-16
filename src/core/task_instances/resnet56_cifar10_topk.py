@@ -22,10 +22,11 @@ _DEFAULT_CHECKPOINT_PATH = _ROOT / "assets" / "resnet56-4bfd9763.th"
 _DEFAULT_TRACE_PATH = _ROOT / "assets" / "resnet56_cifar10_15Mbps_scenario_trace_topk.json"
 _DEFAULT_DATA_ROOT = _ROOT / "data"
 _DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_DEFAULT_FAST_SAMPLES = 100
-_DEFAULT_SIGMA = 0.05
-_DEFAULT_N = 5
-_DEFAULT_ETA_MIN = 0.125
+_DEFAULT_FAST_SAMPLES = 20
+_DEFAULT_TRUE_SAMPLES = 100
+_DEFAULT_SIGMA = 0.1
+_DEFAULT_N = 2
+_DEFAULT_ETA_MIN = 0.01
 
 
 def _env_path(name: str, default_path: Path) -> Path:
@@ -76,6 +77,7 @@ def setup_model_and_callables():
     checkpoint_path = _env_path("RESNET56_PHASE1_CHECKPOINT", _DEFAULT_CHECKPOINT_PATH)
     data_root = _env_path("RESNET56_PHASE1_DATA_ROOT", _DEFAULT_DATA_ROOT)
     fast_samples = int(os.environ.get("RESNET56_PHASE1_FAST_SAMPLES", str(_DEFAULT_FAST_SAMPLES)))
+    true_samples = int(os.environ.get("RESNET56_PHASE1_TRUE_SAMPLES", str(_DEFAULT_TRUE_SAMPLES)))
     sigma = float(os.environ.get("RESNET56_PHASE1_SIGMA", str(_DEFAULT_SIGMA)))
     stein_n = int(os.environ.get("RESNET56_PHASE1_STEIN_N", str(_DEFAULT_N)))
     download = os.environ.get("RESNET56_PHASE1_DOWNLOAD", "0").strip() in {"1", "true", "True"}
@@ -93,6 +95,7 @@ def setup_model_and_callables():
         sigma=sigma,
         N=stein_n,
         n_samples=fast_samples,
+        n_samples_true=true_samples,
         flat_theta=None,
         device=device,
     )
@@ -102,6 +105,7 @@ def setup_model_and_callables():
         "checkpoint_path": str(checkpoint_path),
         "data_root": str(data_root),
         "fast_samples": int(fast_samples),
+        "true_samples": int(true_samples),
     }
     return api, extra
 

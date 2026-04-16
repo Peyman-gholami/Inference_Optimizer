@@ -1,10 +1,11 @@
 """
 Aggregate R-sweep baseline runs into one trade-off plot.
 
-For each algorithm, traces (accuracy at t=T-1, cumulative avg excess delay) as R varies.
+For each algorithm, traces cumulative avg excess delay (x) vs accuracy at t=T-1 (y) as R varies.
 Reads ``tradeoff_y`` as excess delay when ``simulation_metadata.json`` has delay_metric set;
 otherwise treats ``tradeoff_y`` as legacy delay/(1/R) and converts to excess time.
 Uses outputs from compare_to_baselines.py with --R_range (per-R folders R_<value>/).
+The x-axis (excess delay) uses a symmetric log scale; tune linear range with x_symlog_linthresh / --x-symlog-linthresh.
 
 If R_sweep_summary.json exists under the sweep directory, run order and paths are
 taken from it; otherwise subdirectories matching R_* are scanned and sorted by R.
@@ -43,6 +44,16 @@ def _parse_r_from_dirname(name: str) -> Optional[float]:
     if not m:
         return None
     return float(m.group(1))
+
+
+def _legend_label(name: str) -> str:
+    # Keep legend concise: selected compression baseline labels should not include CSI-AWARE.
+    lower = name.lower()
+    if "compression" in lower and ("max" in lower or "min" in lower or "no" in lower):
+        label = re.sub(r"\bcsi[- ]?aware\b", "", name, flags=re.IGNORECASE)
+        label = re.sub(r"\s{2,}", " ", label).strip(" -_")
+        return label
+    return name
 
 
 def discover_runs(sweep_dir: str) -> List[Tuple[float, str]]:
@@ -142,6 +153,7 @@ def plot_r_sweep_tradeoff_excess_delay(
     sweep_dir: str,
     out_path: str,
     cmap: str = "viridis",
+    x_symlog_linthresh: float = 1e-3,
 ) -> str:
     runs = discover_runs(sweep_dir)
     if not runs:
@@ -175,6 +187,9 @@ def plot_r_sweep_tradeoff_excess_delay(
     if ref_order is None:
         raise RuntimeError("No data loaded")
 
+    if x_symlog_linthresh <= 0:
+        raise ValueError("x_symlog_linthresh must be positive for matplotlib symlog")
+
     R_all = sorted({p[0] for pts in series.values() for p in pts})
     R_min, R_max = float(R_all[0]), float(R_all[-1])
     if R_max <= R_min:
@@ -191,23 +206,28 @@ def plot_r_sweep_tradeoff_excess_delay(
         R_vals = np.asarray([p[0] for p in pts], dtype=float)
         accs = np.asarray([p[1] for p in pts], dtype=float)
         excs = np.asarray([p[2] for p in pts], dtype=float)
-        path = np.column_stack([accs, excs])
+        path = np.column_stack([excs, accs])
 
         if path.shape[0] >= 2:
             segments = np.stack([path[:-1], path[1:]], axis=1)
             seg_r = 0.5 * (R_vals[:-1] + R_vals[1:])
             colors = cmap_obj(norm(seg_r))
-            lc = LineCollection(segments, colors=colors, linewidths=0.65, zorder=1)
+            line_style = "--" if "No-CSI" in name else "-"
+            lc = LineCollection(
+                segments,
+                colors=colors,
+                linewidths=0.65,
+                linestyle=line_style,
+                zorder=1,
+            )
             # White halo improves contrast against nearby lines/grid.
             lc.set_path_effects([pe.Stroke(linewidth=2.5, foreground="white"), pe.Normal()])
             ax.add_collection(lc)
 
         m = markers[name]
         ax.scatter(
+            excs,
             accs,
-            excs,
-            excs,
-            excs,
             c=R_vals,
             cmap=cmap_obj,
             norm=norm,
@@ -218,16 +238,17 @@ def plot_r_sweep_tradeoff_excess_delay(
             zorder=3,
         )
 
+        legend_linestyle = "--" if "No-CSI" in name else "-"
         legend_handles.append(
             Line2D(
                 [0],
                 [0],
                 color="0.35",
                 marker=m,
-                linestyle="-",
+                linestyle=legend_linestyle,
                 linewidth=1.4,
                 markersize=7,
-                label=name,
+                label=_legend_label(name),
             )
         )
 
@@ -236,11 +257,12 @@ def plot_r_sweep_tradeoff_excess_delay(
     cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(r"$R_k$")
 
-    ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.55)
-    ax.set_xlabel("Cumulative average accuracy at t = T-1")
-    ax.set_ylabel(r"Cumulative avg $D_k - 1/R_k$ at $t = T-1$")
+    ax.axvline(0.0, color="black", linewidth=1.0, alpha=0.55)
+    ax.set_xscale("symlog", linthresh=x_symlog_linthresh)
+    ax.set_xlabel(r"Cumulative avg $D_k - 1/R_k$ at $t = T-1$")
+    ax.set_ylabel("Cumulative average accuracy at t = T-1")
     ax.set_title("Accuracy vs excess delay across R sweep (one trajectory per algorithm)")
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3, which="both")
     ax.legend(handles=legend_handles, ncol=1, fontsize=8)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     fig.savefig(out_path, dpi=180)
@@ -268,6 +290,12 @@ def main() -> None:
         default="viridis",
         help="Matplotlib colormap name for coloring by R_k (default: viridis).",
     )
+    p.add_argument(
+        "--x-symlog-linthresh",
+        type=float,
+        default=1e-3,
+        help="Symmetric log x-axis: linear within ±this value (matplotlib linthresh; default: 1e-3).",
+    )
     args = p.parse_args()
     out = args.out or os.path.join(
         os.path.abspath(args.sweep_dir),
@@ -277,6 +305,7 @@ def main() -> None:
         sweep_dir=args.sweep_dir,
         out_path=out,
         cmap=args.cmap,
+        x_symlog_linthresh=args.x_symlog_linthresh,
     )
     print(f"Wrote {saved}")
 

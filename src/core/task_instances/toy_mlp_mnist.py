@@ -14,6 +14,15 @@ from ..stein_oracles import MLP, get_flat_params
 from ..task import InferenceTask
 from ..task_callables import InferenceTaskCallables
 
+# Bytes per compressed activation tensor on each link (float32), for a batch of B
+# images. Cuts follow ReLU outputs: (B, 128) then (B, 64). Match ResNet trace
+# convention (B = 100).
+_MLP_COMM_BATCH = 100
+_MLP_A_BYTES = {
+    0: float(_MLP_COMM_BATCH * 128 * 4),
+    1: float(_MLP_COMM_BATCH * 64 * 4),
+}
+
 
 def setup_model_and_callables():
     """
@@ -76,8 +85,8 @@ def make_task(
         b_k=0,
         L_k=3,
         tau={0: 0.01, 1: 0.01, 2: 0.01},
-        a={0: 10.0, 1: 20.0},
-        eta_min={0: 0.1, 1: 0.1},
+        a=dict(_MLP_A_BYTES), #10 , 20
+        eta_min={0: 0.01, 1: 0.01},
         R_k_callable=lambda t, _R=R_k: float(_R),
         w_k=w_k,
         accuracy_callable=api.accuracy_callable,

@@ -199,7 +199,7 @@ def run_compare(
 
     # Algorithms
     csi_opt = CSIAwareMultiTaskOptimizer(M=M, tasks=tasks)
-    no_csi_opt = NoCSIMultiTaskOptimizer(M=M, tasks=tasks, mu=mu, epsilon=epsilon, J=10)
+    no_csi_opt = NoCSIMultiTaskOptimizer(M=M, tasks=tasks, mu=mu, epsilon=epsilon, J=5)
 
     algos: List[Tuple[str, BaseOptimizer]] = [
         ("CSI-Aware (optimal)", csi_opt),
@@ -305,12 +305,11 @@ def run_compare(
             if allocations is None:
                 print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
                 continue
-            if allocations is None:
-                print(f"algo: {name}, allocations: None (infeasible) -> skipping t={t}")
-                continue
             print(f"algo: {name}, allocations: {allocations}")
             acc_hist[name][t] = _weighted_accuracy(tasks, allocations)
+            print(f"algo: {name}, accuracy: {acc_hist[name][t]}")
             excess_delay_hist[name][t] = _avg_excess_delay(opt, tasks, t, allocations, c_t)
+            print(f"algo: {name}, excess delay: {excess_delay_hist[name][t]}")
 
             # Store per-task eta values if present.
             algo_idx = algo_index[name]
@@ -530,7 +529,7 @@ def main() -> None:
     p.add_argument(
         "--baseline_algorithms",
         type=str,
-        default="max_compression,no_compression,equal_share,proportional,strict_priority,decoupled_equal_split,queue_proportional,certainty_equivalence,lcb",
+        default="max_compression,no_compression,equal_share,proportional,strict_priority,decoupled_equal_split,queue_proportional,certainty_equivalence",#lcb
         help=(
             "Comma-separated baseline algorithms to include. "
             "Use 'none' to disable all baselines. "
