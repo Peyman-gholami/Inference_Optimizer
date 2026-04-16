@@ -1,5 +1,6 @@
 numpy
 scipy
+scikit-learn
 # for running the test
 pytest
 # Plotting for baseline comparisons

@@ -39,6 +39,50 @@ from src.optimizers.baseline import (
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TRACE_PATH = ROOT / "assets" / "resnet56_cifar10_15Mbps_scenario_trace_topk.json"
 
+# Accuracy estimator configuration.
+# Change these globals before calling run_compare_trace() if you want to switch modes.
+# Set to "stein_estimator" for the original Stein-gradient path, or "fitting_model" to use the fitted poly3 .pkl model.
+ACCURACY_ESTIMATOR_MODE = "fitting_model"
+# Default is the topk poly3 model. If you switch COMPRESSOR_NAME, update this to the matching quantization/llmint8 pkl.
+FITTING_MODEL_PATH = ROOT / "assets" / "jetson_resnet_3tp_poly3_flex.pkl"
+# Set to "topk", "quantization", or "llmint8".
+COMPRESSOR_NAME = "topk"
+# Required only when COMPRESSOR_NAME == "llmint8".
+LLMINT8_MAPPING_PATH = ROOT / "assets" / "raw_accuracy_resnet56_llmint8_eta_mapping.json"
+LLMINT8_POLICY = "fp16_int4"
+LLMINT8_OUTLIER_PRECISION = "fp16"
+LLMINT8_REGULAR_PRECISION = "int4"
+
+
+def _canonical_compressor_name(value: str) -> str:
+    normalized = str(value).strip().lower()
+    aliases = {
+        "topk": "topk",
+        "quant": "quantization",
+        "quantization": "quantization",
+        "llmint8": "llmint8",
+        "llm_int8": "llmint8",
+        "llm.int8": "llmint8",
+    }
+    if normalized not in aliases:
+        raise ValueError("Unsupported COMPRESSOR_NAME={!r}".format(value))
+    return aliases[normalized]
+
+
+def _apply_accuracy_config() -> None:
+    os.environ["RESNET56_ACCURACY_ESTIMATOR_MODE"] = str(ACCURACY_ESTIMATOR_MODE)
+    resolved_path = Path(FITTING_MODEL_PATH).expanduser().resolve()
+    os.environ["RESNET56_FITTING_MODEL_PATH"] = str(resolved_path)
+    os.environ["RESNET56_COMPRESSOR_NAME"] = _canonical_compressor_name(COMPRESSOR_NAME)
+    os.environ["RESNET56_LLMINT8_MAPPING_PATH"] = str(Path(LLMINT8_MAPPING_PATH).expanduser().resolve())
+    os.environ["RESNET56_LLMINT8_POLICY"] = str(LLMINT8_POLICY)
+    os.environ["RESNET56_LLMINT8_OUTLIER_PRECISION"] = str(LLMINT8_OUTLIER_PRECISION)
+    os.environ["RESNET56_LLMINT8_REGULAR_PRECISION"] = str(LLMINT8_REGULAR_PRECISION)
+
+
+def _describe_fitting_model_target() -> str:
+    return str(Path(FITTING_MODEL_PATH).expanduser().resolve())
+
 
 def _load_channel_trace(trace_path: Path, T: Optional[int]) -> np.ndarray:
     payload = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -90,6 +134,7 @@ def run_compare_trace(
     task_name: str = "resnet56_cifar10_topk",
     M: int = 4,
 ) -> Tuple[str, str, str]:
+    _apply_accuracy_config()
     _ = np.random.default_rng(seed)
     c_t_hist = _load_channel_trace(trace_path=trace_path, T=T)
     horizon = int(c_t_hist.shape[0])
@@ -192,7 +237,17 @@ def run_compare_trace(
                 allocations = opt.optimize(t=t, c_t=c_t)
 
             if allocations is None:
-                continue
+                fallback_eta = np.array(
+                    [float(task.eta_min[i]) for i in range(task.b_k, task.e_k)],
+                    dtype=float,
+                )
+                allocations = {
+                    task.task_id: {
+                        "eta": fallback_eta,
+                        "s_comp": np.ones(task.L_k, dtype=float),
+                        "s_comm": np.ones(task.L_k - 1, dtype=float),
+                    }
+                }
 
             acc_hist[name][t] = _compute_accuracy(task, allocations)
             delay, excess_delay = _compute_delay_and_excess(opt, task, t, allocations, c_t)
@@ -262,9 +317,13 @@ def run_compare_trace(
         "baseline_algorithms_used": list(selected_baselines),
         "algo_names": algo_names,
         "task_name": str(task_name),
+        "compressor_name": str(getattr(task, "compressor_name", COMPRESSOR_NAME)),
         "delay_metric": "excess_delay_D_minus_invR",
         "trace_path": str(trace_path),
         "channel_source": "scenario_trace.channel_true_bps",
+        "accuracy_estimator_mode": str(getattr(task, "accuracy_estimator_mode", "unknown")),
+        "fitting_model_type": getattr(task, "fitting_model_type", None),
+        "fitting_model_path": getattr(task, "fitting_model_path", None),
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
@@ -371,8 +430,20 @@ def main() -> int:
     baseline_algorithms = [] if baseline_arg == "none" else [part.strip() for part in args.baseline_algorithms.split(",") if part.strip()]
 
     trace_path = Path(args.trace_path).expanduser().resolve()
+    _apply_accuracy_config()
     print(f"Using trace={trace_path}")
     print("Channel source: scenario trace channel_true_bps (direct replay)")
+    print("Compressor: {}".format(os.environ["RESNET56_COMPRESSOR_NAME"]))
+    print(
+        "Accuracy estimator mode: {}".format(
+            os.environ["RESNET56_ACCURACY_ESTIMATOR_MODE"]
+        )
+    )
+    if os.environ["RESNET56_ACCURACY_ESTIMATOR_MODE"] == "fitting_model":
+        print("Fitting model path: {}".format(_describe_fitting_model_target()))
+    if os.environ["RESNET56_COMPRESSOR_NAME"] == "llmint8":
+        print("LLM.int8 mapping path: {}".format(os.environ["RESNET56_LLMINT8_MAPPING_PATH"]))
+        print("LLM.int8 policy: {}".format(os.environ["RESNET56_LLMINT8_POLICY"]))
 
     run_compare_trace(
         trace_path=trace_path,
@@ -383,7 +454,7 @@ def main() -> int:
         no_csi_mu=args.mu,
         no_csi_epsilon=args.epsilon,
         R_k=args.R,
-        task_name="resnet56_cifar10_topk",
+        task_name="resnet56_cifar10_{}".format(_canonical_compressor_name(COMPRESSOR_NAME)),
         M=args.M,
     )
     return 0

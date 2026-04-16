@@ -224,7 +224,13 @@ class EstimatedCSICompressionSingleTaskBaseline(BaseOptimizer):
 
         links = list(range(task.b_k, task.e_k))
         eta = np.array(
-            [min(1.0, float(c_hat[i]) / (R_t * task.a[i])) for i in links],
+            [
+                max(
+                    float(task.eta_min[i]),
+                    min(1.0, float(c_hat[i]) / (R_t * task.a[i])),
+                )
+                for i in links
+            ],
             dtype=float,
         )
 
@@ -709,4 +715,3 @@ class LCBCertaintyEquivalenceMultiTaskBaseline(BaseOptimizer):
 
     def optimize(self, t: int, c_hat: np.ndarray) -> Optional[Dict[int, Dict[str, np.ndarray]]]:
         return self._solver.optimize(t=t, c_t=c_hat)
-
