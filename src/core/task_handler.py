@@ -17,6 +17,8 @@ from .task_instances import toy_mlp_mnist
 
 _REGISTRY: Dict[str, Any] = {
     "resnet56_cifar10_topk": resnet56_cifar10_topk,
+    "resnet56_cifar10_quantization": resnet56_cifar10_topk,
+    "resnet56_cifar10_llmint8": resnet56_cifar10_topk,
     "toy_mlp_mnist": toy_mlp_mnist,
 }
 
