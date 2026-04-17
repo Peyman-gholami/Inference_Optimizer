@@ -96,7 +96,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib
@@ -144,7 +144,7 @@ class MultiTaskExperimentSetting:
     c_min:               float
     c_max:               float
     c_dist:              str
-    R_k:                 float
+    R_k_per_task:        List[float]
     eta_min:             float
     T:                   int
     seed:                int
@@ -185,6 +185,10 @@ class MultiTaskExperimentSetting:
     task_llm_models:  List[str] = field(default_factory=list)
     # Per-task eta_min overrides (length K or empty)
     task_eta_mins:    List[float] = field(default_factory=list)
+    # Per-task weight overrides w_k (length K or empty).
+    # Default: w_k = float(task_id) i.e. task 1 → 1.0, task 2 → 2.0, etc.
+    task_weight_overrides: List[float] = field(default_factory=list)
+    num_links:           int  = 0
     L_k:                 int  = 0
     a_base:              Dict[int, float] = field(default_factory=dict)
     tau:                 Dict[int, float] = field(default_factory=dict)
@@ -194,14 +198,24 @@ class MultiTaskExperimentSetting:
     def _is_cross_backend(self) -> bool:
         return len(self.task_backends) > 0
 
+    def _r_k_str(self) -> str:
+        """Compact R_k display: single value if all equal, list otherwise."""
+        vals = self.R_k_per_task
+        if not vals:
+            return "?"
+        if len(set(vals)) == 1:
+            return str(vals[0])
+        return "[" + ",".join(str(v) for v in vals) + "]"
+
     def short_label(self) -> str:
+        r_str = self._r_k_str()
         if self._is_cross_backend():
             backends_str = "+".join(self.task_backends)
             compressors_str = "+".join(self.task_compressors) if self.task_compressors else "mixed"
             return (
                 f"CROSS({backends_str}) | {compressors_str} | "
                 f"K={self.K} | c~U[{self.c_min:.0f},{self.c_max:.0f}] | "
-                f"R_k={self.R_k} | T={self.T} seed={self.seed}"
+                f"R_k={r_str} | T={self.T} seed={self.seed}"
             )
         if self.backend == "llm":
             model_short = self.llm_model_name.split("/")[-1] if self.llm_model_name else "llm"
@@ -209,19 +223,20 @@ class MultiTaskExperimentSetting:
             return (
                 f"LLM({model_short}) | {comp_str}/{self.compressor_backend} | "
                 f"K={self.K} | c~U[{self.c_min:.0f},{self.c_max:.0f}] | "
-                f"R_k={self.R_k} | η_min={self.eta_min} | T={self.T} seed={self.seed}"
+                f"R_k={r_str} | η_min={self.eta_min} | T={self.T} seed={self.seed}"
             )
         return (
             f"{self.backend.upper()} | {self.compressor}/{self.compressor_backend} | "
             f"K={self.K} | c~U[{self.c_min:.0f},{self.c_max:.0f}] | "
-            f"R_k={self.R_k} | η_min={self.eta_min} | T={self.T} seed={self.seed}"
+            f"R_k={r_str} | η_min={self.eta_min} | T={self.T} seed={self.seed}"
         )
 
     def detail_label(self) -> str:
+        r_str = self._r_k_str()
         if self._is_cross_backend():
             lines = [
                 f"CROSS-BACKEND  K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]"
-                f"  R_k={self.R_k}  T={self.T}  seed={self.seed}",
+                f"  R_k={r_str}  T={self.T}  seed={self.seed}",
                 f"μ={self.no_csi_mu}  ε={self.no_csi_epsilon}  J={self.no_csi_J}",
             ]
             for k_idx in range(self.K):
@@ -229,28 +244,29 @@ class MultiTaskExperimentSetting:
                 ck = self.task_compressors[k_idx] if k_idx < len(self.task_compressors) else "?"
                 mk = self.task_llm_models[k_idx] if k_idx < len(self.task_llm_models) else ""
                 em = self.task_eta_mins[k_idx] if k_idx < len(self.task_eta_mins) else self.eta_min
+                rk = self.R_k_per_task[k_idx] if k_idx < len(self.R_k_per_task) else "?"
                 model_info = f"  model={mk.split('/')[-1]}" if mk else ""
-                lines.append(f"  task{k_idx+1}: backend={bk}  compressor={ck}{model_info}  η_min={em}")
+                lines.append(f"  task{k_idx+1}: backend={bk}  compressor={ck}{model_info}  η_min={em}  R_k={rk}")
         elif self.backend == "llm":
             model_short = self.llm_model_name.split("/")[-1] if self.llm_model_name else "llm"
             comp_str    = self.llm_activation_strategy or self.compressor
             lines = [
                 f"LLM({model_short})  strategy={comp_str}/{self.compressor_backend}  split={self.llm_split_mode}",
-                f"K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]  R_k={self.R_k}  T={self.T}  seed={self.seed}",
+                f"K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]  R_k={r_str}  T={self.T}  seed={self.seed}",
                 f"η_min={self.eta_min}  μ={self.no_csi_mu}  ε={self.no_csi_epsilon}  J={self.no_csi_J}",
                 f"σ={self.llm_grad_sigma}  N={self.llm_grad_N}  fast_samples/subj={self.llm_fast_samples}",
             ]
         elif self.backend == "resnet":
             lines = [
                 f"ResNet56  compressor={self.compressor}/{self.compressor_backend}  cutpoints={self.resnet_cutpoints}",
-                f"K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]  R_k={self.R_k}  T={self.T}  seed={self.seed}",
+                f"K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]  R_k={r_str}  T={self.T}  seed={self.seed}",
                 f"η_min={self.eta_min}  μ={self.no_csi_mu}  ε={self.no_csi_epsilon}  J={self.no_csi_J}",
                 f"σ={self.resnet_grad_sigma}  N={self.resnet_grad_N}  fast_batches={self.resnet_fast_batches}",
             ]
         else:
             lines = [
                 f"MLP/MNIST  compressor={self.compressor}/{self.compressor_backend}",
-                f"K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]  R_k={self.R_k}  T={self.T}  seed={self.seed}",
+                f"K={self.K}  c~U[{self.c_min:.0f},{self.c_max:.0f}]  R_k={r_str}  T={self.T}  seed={self.seed}",
                 f"η_min={self.eta_min}  μ={self.no_csi_mu}  ε={self.no_csi_epsilon}  J={self.no_csi_J}",
                 f"σ={self.mlp_sigma}  N={self.mlp_N}  n_samples={self.mlp_n_samples}",
             ]
@@ -259,9 +275,10 @@ class MultiTaskExperimentSetting:
                 f"links={self.num_links}  a_base={[f'{self.a_base[i]:.0f}' for i in range(self.num_links)]}"
             )
             for tid, a_k in self.task_a.items():
-                w = self.task_weights.get(tid, 1.0)
+                w  = self.task_weights.get(tid, 1.0)
+                rk = self.R_k_per_task[tid - 1] if (tid - 1) < len(self.R_k_per_task) else "?"
                 lines.append(
-                    f"  task{tid}(w={w:.0f}): a={[f'{a_k[i]:.0f}' for i in range(self.num_links)]}"
+                    f"  task{tid}(w={w:.0f}, R_k={rk}): a={[f'{a_k[i]:.0f}' for i in range(self.num_links)]}"
                 )
         return "\n".join(lines)
 
@@ -280,8 +297,8 @@ class MultiTaskExperimentSetting:
               + ("  (default)" if self.seed == 12 else ""), flush=True)
         print(f"    c_dist             = {self.c_dist}  [{self.c_min:.0f}, {self.c_max:.0f}]",
               flush=True)
-        print(f"    R_k                = {self.R_k}"
-              + ("  (default)" if self.R_k == 10.0 else ""), flush=True)
+        print(f"    R_k_per_task       = {self.R_k_per_task}"
+              + ("  (all equal)" if len(set(self.R_k_per_task)) == 1 else ""), flush=True)
         print(f"    eta_min            = {self.eta_min}", flush=True)
         print(f"    heterogeneous_a    = {self.heterogeneous_a}"
               + ("  (default)" if self.heterogeneous_a else ""), flush=True)
@@ -541,7 +558,7 @@ def build_tasks(
     In cross-backend mode each api is different.
     Fills s.num_links, s.L_k, s.a_base, s.tau, s.task_a, s.task_weights in-place.
     """
-    R_k_callable = lambda t, *_, r=s.R_k: r  # default; overridden per-task for llmint8
+    R_k_callable = lambda t, *_, r=s.R_k_per_task[0]: r  # default for task 0; overridden per-task below
 
     # ── Derive topology from task 0's api (all tasks share same L_k / num_links) ─
     api0   = apis[0]
@@ -584,7 +601,9 @@ def build_tasks(
     tasks = []
     for k_idx, api in enumerate(apis):
         task_id = k_idx + 1
-        w_k     = float(task_id)
+        w_k = (s.task_weight_overrides[k_idx]
+               if k_idx < len(s.task_weight_overrides)
+               else float(task_id))
 
         # Per-task a[i]: in cross-backend mode, derive from each task's own api.
         # In single-backend mode, apply the heterogeneous scaling as before.
@@ -633,10 +652,11 @@ def build_tasks(
 
         eta_min_d = {i: em for i in range(num_links)}
 
+        r_k = s.R_k_per_task[k_idx] if k_idx < len(s.R_k_per_task) else s.R_k_per_task[-1]
         if is_llmint8_k:
-            R_k_callable = make_llmint8_R_k_callable(s.R_k, a_k)
+            R_k_callable = make_llmint8_R_k_callable(r_k, a_k)
         else:
-            R_k_callable = lambda t, *_, r=s.R_k: r
+            R_k_callable = lambda t, *_, r=r_k: r
 
         task = InferenceTask(
             task_id=task_id, b_k=0, L_k=num_nodes,
@@ -819,7 +839,7 @@ def build_tasks_cross(s: MultiTaskExperimentSetting) -> List[InferenceTask]:
     All tasks must produce the same number of links — this is enforced by
     the fixed 3-node / 2-link topology used throughout the codebase.
     """
-    R_k_callable = lambda t, *_, r=s.R_k: r
+    R_k_callable = lambda t, *_, r=s.R_k_per_task[0]: r  # placeholder; overridden per-task below
     tasks        = []
     ref_num_links = None
     ref_num_nodes = None
@@ -874,14 +894,23 @@ def build_tasks_cross(s: MultiTaskExperimentSetting) -> List[InferenceTask]:
         # The a[i] values already differ enormously between backends
         # (ResNet: ~65KB, Llama: ~4MB) which is the natural heterogeneity.
         a_k     = dict(a_base)
-        w_k     = float(task_id)
+        w_k     = (s.task_weight_overrides[k_idx]
+                   if k_idx < len(s.task_weight_overrides)
+                   else float(task_id))
         eta_min = {i: eta_min_k for i in range(num_links)}
+
+        r_k = s.R_k_per_task[k_idx] if k_idx < len(s.R_k_per_task) else s.R_k_per_task[-1]
+        is_llmint8_cross = (comp.lower() == "llmint8")
+        if is_llmint8_cross:
+            task_R_k_callable = make_llmint8_R_k_callable(r_k, a_k)
+        else:
+            task_R_k_callable = lambda t, *_, r=r_k: r
 
         task = InferenceTask(
             task_id=task_id, b_k=0, L_k=num_nodes,
             tau=ref_tau, a=a_k,
             eta_min=eta_min,
-            R_k_callable=R_k_callable,
+            R_k_callable=task_R_k_callable,
             w_k=w_k,
             accuracy_callable=api.accuracy_callable,
             accuracy_callable_true=api.accuracy_callable_true,
@@ -905,7 +934,7 @@ def build_algorithms(
     num_links = M - 1
 
     lcb = MeanMinusZStdLCB(
-        num_links=num_links, warmup_value=s.c_min,
+        num_links=num_links, warmup_value=(s.c_min + s.c_max) / 2.0,
         z=1.2815515655446004, warmup=5,
     )
     hist_mean = None
@@ -991,6 +1020,9 @@ def run_simulation(
     # Per-task accuracy: shape (A, T, K)
     per_task_acc    = {n: np.full((T, K), np.nan) for n in algo_names}
 
+    # Per-task delay ratio: shape (T, K)
+    per_task_delay  = {n: np.full((T, K), np.nan) for n in algo_names}
+
     # Per-task eta: shape (A, T, K, L)
     eta_hist        = {n: np.full((T, K, num_links), np.nan) for n in algo_names}
 
@@ -1025,6 +1057,8 @@ def run_simulation(
                         "s_comp": np.ones(task.L_k, dtype=float),
                         "s_comm": np.ones(task.L_k - 1, dtype=float),
                     }
+            wacc = 0.0
+            wsum = 0.0
             for k_idx, task in enumerate(tasks):
                 eta    = allocations[task.task_id]["eta"]
                 a_k    = float(task.A_k_true(eta))
@@ -1334,7 +1368,16 @@ def main():
     p.add_argument("--c_max", type=float, default=None)
 
     # Task parameters
-    p.add_argument("--R_k",     type=float, default=10.0)
+    p.add_argument(
+        "--R", type=float, default=10.0,
+        help="Default deadline R for all tasks when --R_k is not set. "
+             "Ignored if --R_k provides per-task values.")
+    p.add_argument(
+        "--R_k", nargs="+", type=float, default=None,
+        help="Per-task deadlines R_k (length 1 or K). "
+             "One value repeats for all K tasks; otherwise supply exactly K values. "
+             "Example: --R_k 10 20  (task 1 R=10, task 2 R=20). "
+             "Overrides --R.")
     p.add_argument("--eta_min", type=float, default=None)
     p.add_argument("--heterogeneous_a", type=lambda x: x.lower() != "false",
                    default=True,
@@ -1347,29 +1390,11 @@ def main():
     p.add_argument("--no_csi_J",       type=int,   default=10,
                    help="BCD inner iterations for No-CSI multi-task (default: 10).")
 
-    # Cross-backend mode
     p.add_argument(
-        "--task_backends", nargs="*", default=None,
-        help="Per-task backend list (length K). Activates cross-backend mode. "
-             "Example: --task_backends resnet llm",
-    )
-    p.add_argument(
-        "--task_compressors", nargs="*", default=None,
-        help="Per-task compressor/strategy (length K). "
-             "For resnet tasks: topk|quantization|llmint8. "
-             "For llm tasks: topk_per_token|magnitude|random|quantization|llmint8. "
-             "Example: --task_compressors topk topk_per_token",
-    )
-    p.add_argument(
-        "--task_llm_models", nargs="*", default=None,
-        help="Per-task HuggingFace model ID for LLM tasks (length K). "
-             "Use empty string '' for non-LLM tasks. "
-             "Example: --task_llm_models '' meta-llama/Llama-3.1-8B-Instruct",
-    )
-    p.add_argument(
-        "--task_eta_mins", nargs="*", type=float, default=None,
-        help="Per-task eta_min overrides (length K). "
-             "Example: --task_eta_mins 0.125 0.25",
+        "--task_weights", nargs="*", type=float, default=None,
+        help="Per-task objective weights w_k (length K). "
+             "Default: w_k = float(task_id), i.e. task 1 weight 1.0, task 2 weight 2.0. "
+             "Example: --task_weights 1.0 3.0",
     )
 
     # Run
@@ -1412,6 +1437,23 @@ def main():
     bl_arg    = args.baselines.strip().lower()
     baselines = [] if bl_arg == "none" else [b.strip() for b in bl_arg.split(",") if b.strip()]
 
+    # ── Resolve per-task R_k list ─────────────────────────────────────────────
+    # Mirrors compare_to_baselines_multi.py: one value repeats for all K, or
+    # exactly K values must be supplied.
+    K_for_rk = len(args.task_backends) if args.task_backends else args.K
+    if args.R_k is not None:
+        if len(args.R_k) == 1:
+            R_k_per_task = [float(args.R_k[0])] * K_for_rk
+        elif len(args.R_k) == K_for_rk:
+            R_k_per_task = [float(v) for v in args.R_k]
+        else:
+            raise ValueError(
+                f"--R_k: provide 1 value (repeated for all {K_for_rk} tasks) or "
+                f"exactly {K_for_rk} values; got {len(args.R_k)}: {args.R_k}"
+            )
+    else:
+        R_k_per_task = [float(args.R)] * K_for_rk
+
     # ── Cross-backend validation ──────────────────────────────────────────────
     cross_backend = args.task_backends is not None
     if cross_backend:
@@ -1420,6 +1462,13 @@ def main():
             print(f"[run_experiment_multi] --K overridden to {K} by --task_backends.",
                   flush=True)
         args.K = K
+        # Re-expand R_k_per_task now that we know K from task_backends
+        if len(R_k_per_task) == 1:
+            R_k_per_task = R_k_per_task * K
+        elif len(R_k_per_task) != K:
+            raise ValueError(
+                f"--R_k: got {len(R_k_per_task)} values but --task_backends implies K={K}"
+            )
         # Fill defaults for per-task lists
         task_compressors = (args.task_compressors or
                             [(args.compressor if tb != "llm" else "topk_per_token")
@@ -1448,7 +1497,7 @@ def main():
         c_min              = c_min,
         c_max              = c_max,
         c_dist             = "uniform",
-        R_k                = args.R_k,
+        R_k_per_task       = R_k_per_task,
         eta_min            = eta_min,
         T                  = args.T,
         seed               = args.seed,
@@ -1480,6 +1529,7 @@ def main():
         task_compressors = task_compressors,
         task_llm_models  = task_llm_models,
         task_eta_mins    = task_eta_mins,
+        task_weight_overrides = args.task_weights or [],
     )
 
     # Auto-force gpu for LLM + llmint8

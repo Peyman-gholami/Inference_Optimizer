@@ -1288,7 +1288,7 @@ def main():
                   flush=True)
 
     hist = run_simulation(task, algos, s, lcb, myopic_est, cons_est, ma_est,
-                          out_dir=out_dir, checkpoint_every=5,
+                          out_dir=out_dir, checkpoint_every=1,
                           checkpoint=checkpoint)
 
     save_results(task, hist, s, out_dir)

@@ -68,10 +68,19 @@ ALGO_SHORT = {
 }
 
 COMP_KEYS   = ["topk", "quant", "int8"]   # column sub-headers T Q I8
+'''
 METRICS     = ["utility", "acc", "delay_ms", "excess_delay_ms", "delay_ratio"]
 METRIC_LABELS = {
     "utility":          "Avg.~utility",
     "acc":              "Avg.~acc./qual.",
+    "delay_ms":         "Avg.~delay (ms)",
+    "excess_delay_ms":  "Excess delay (ms)",
+    "delay_ratio":      "Delay ratio",
+}
+'''
+METRICS     = ["utility", "delay_ms", "excess_delay_ms", "delay_ratio"]
+METRIC_LABELS = {
+    "utility":          "Avg.~utility",
     "delay_ms":         "Avg.~delay (ms)",
     "excess_delay_ms":  "Excess delay (ms)",
     "delay_ratio":      "Delay ratio",
