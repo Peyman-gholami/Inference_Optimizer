@@ -17,6 +17,10 @@ What was added:
   - copied 15 Mbps scenario trace used to derive fixed `tau` and `a`
 - `assets/resnet56_cifar10_15Mbps_trace_summary_topk.json`
   - copied summary reference
+- `assets/raw_accuracy_resnet56_llmint8_eta_mapping.json`
+  - local llmint8 eta-to-codec mapping so llmint8 mode does not depend on the parent workspace
+- `compressors.py`
+  - local activation compressor implementations used by the ResNet task instance
 - `resnet20.py`
   - copied locally so this Phase 1 directory is self-contained
 

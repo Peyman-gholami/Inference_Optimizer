@@ -4,7 +4,6 @@ import json
 import os
 import pickle
 from pathlib import Path
-import sys
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -32,14 +31,9 @@ _DEFAULT_ETA_MIN = 0.125
 _DEFAULT_ACCURACY_ESTIMATOR_MODE = "stein_estimator"
 _DEFAULT_COMPRESSOR_NAME = "topk"
 _DEFAULT_LLMINT8_MAPPING_PATH = _ROOT / "assets" / "raw_accuracy_resnet56_llmint8_eta_mapping.json"
-_FALLBACK_LLMINT8_MAPPING_PATH = _ROOT.parent / "acc_estimatior_fitting_models" / "raw_accuracy_resnet56_llmint8_eta_mapping.json"
 _DEFAULT_LLMINT8_POLICY = "fp16_int4"
 _DEFAULT_LLMINT8_OUTLIER_PRECISION = "fp16"
 _DEFAULT_LLMINT8_REGULAR_PRECISION = "int4"
-
-_WORKSPACE_ROOT = _ROOT.parent
-if str(_WORKSPACE_ROOT) not in sys.path:
-    sys.path.insert(0, str(_WORKSPACE_ROOT))
 
 from llmint8_eta_mapping import validate_llmint8_mapping_entries  # type: ignore
 from llmint8_eta_mapping import resolve_codec_execution_plan  # type: ignore
@@ -105,9 +99,7 @@ def _resolve_llmint8_mapping_path() -> Path:
     if explicit_path:
         path = Path(explicit_path).expanduser()
         return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
-    if _DEFAULT_LLMINT8_MAPPING_PATH.exists():
-        return _DEFAULT_LLMINT8_MAPPING_PATH.resolve()
-    return _FALLBACK_LLMINT8_MAPPING_PATH.resolve()
+    return _DEFAULT_LLMINT8_MAPPING_PATH.resolve()
 
 
 def _resolve_llmint8_mapping_entries(num_links: int) -> list[Dict[str, Any]]:
