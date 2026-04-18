@@ -16,32 +16,32 @@ mkdir -p "$(dirname ${OUT_FILE})"
 
 python ${HOME_DIR}/fill_table3_not_all_runs.py \
 \
-    --scenario "OF-Lang-PR025-R1" \
+    --scenario "OF-Lang-Fit-ηmin025-μ05" \
     --topk  "empty" \
     --quant "${HOME_DIR}/outputs/single_experiments/group2_predictor_025/llama/quantization" \
     --int8  "empty" \
 \
-    --scenario "OF-Lang-PR025-R2" \
+    --scenario "OF-Lang-Fit-ηmin025-μ01" \
     --topk "${HOME_DIR}/outputs/single_experiments/group2_predictor_025/llama/topk_per_token" \
     --quant  "empty" \
     --int8  "empty" \
 \
-    --scenario "OF-Lang-PR00-R1" \
+    --scenario "OF-Lang-Fit-ηmin01-μ05" \
     --topk  "empty" \
     --quant "${HOME_DIR}/outputs/single_experiments/group2_predictor_00/run1/quantization" \
     --int8  "empty" \
 \
-    --scenario "OF-Lang-PR00-R2" \
+    --scenario "OF-Lang-Fit-ηmin01-μ01" \
     --topk "${HOME_DIR}/outputs/single_experiments/group2_predictor_00/run2/topk_per_token" \
     --quant  "empty" \
     --int8  "empty" \
 \
-    --scenario "OF-Lang-PR00-R3" \
+    --scenario "OF-Lang-Fit-ηmin01-μ1e09" \
     --topk  "${HOME_DIR}/outputs/single_experiments/group2_predictor_00/run3/topk_per_token" \
     --quant "${HOME_DIR}/outputs/single_experiments/group2_predictor_00/run3/quantization" \
     --int8  "${HOME_DIR}/outputs/single_experiments/group2_predictor_00/run3/llmint8" \
 \
-    --scenario "OF-Lang-PR01-5shots-R1" \
+    --scenario "OF-Lang-5shots-Fit-ηmin01-μ1e06" \
     --topk  "${HOME_DIR}/outputs/single_experiments/group2_predictor/run1/topk_per_token" \
     --quant "${HOME_DIR}/outputs/single_experiments/group2_predictor/run1/quantization" \
     --int8 "${HOME_DIR}/outputs/single_experiments/group2_predictor/run1/llmint8" \

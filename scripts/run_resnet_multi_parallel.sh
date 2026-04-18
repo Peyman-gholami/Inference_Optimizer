@@ -44,7 +44,7 @@ N=20
 
 OUT_BASE="${HOME_DIR}/outputs/multi_experiments/resnet"
 
-TIME_LIMIT="3:00:00"
+TIME_LIMIT="8:00:00"
 MEM="16G"
 
 # =============================================================================
@@ -52,6 +52,8 @@ MEM="16G"
 # =============================================================================
 
 mkdir -p logs
+
+#     --R_k ${R_K} \\
 
 # ─────────────────────────────────────────────────────────────────────────────
 # submit_multi SUFFIX K C_MIN C_MAX R_K EXTRA_ARGS
@@ -112,7 +114,7 @@ python ${HOME_DIR}/run_experiment_multi.py \\
     --eta_min ${ETA_MIN} \\
     --no_csi_mu ${MU} \\
     --no_csi_epsilon ${EPSILON} \\
-    --R_k ${R_K} \\
+    --R_k 5 10 \\
     --c_min ${C_MIN} --c_max ${C_MAX} \\
     --T ${T} --seed ${SEED} \\
     --out_dir ${OUT_BASE_SCEN}/${COMP} \\
@@ -125,6 +127,10 @@ python ${HOME_DIR}/run_experiment_multi.py \\
 # =============================================================================
 # EXPERIMENTS
 # =============================================================================
+
+submit_multi "MT-R7-Rks" 2 \
+    60000 300000 10
+
 
 # ── MT-R1: K=2 symmetric, transitional channel ───────────────────────────────
 # Both tasks identical. Water-filling should split equally.
@@ -148,9 +154,9 @@ python ${HOME_DIR}/run_experiment_multi.py \\
 # ── MT-R4: K=2 asymmetric weights (w_1=1.0, w_2=3.0) ────────────────────────
 # High-weight task 2 should receive preferential bandwidth allocation.
 # Tests the priority-aware water-filling behaviour.
-submit_multi "MT-R4-weights" 2 \
-    60000 300000 10 \
-    --task_weights 1.0 3.0
+#submit_multi "MT-R4-weights" 2 \
+#    60000 300000 10 \
+#    --task_weights 1.0 3.0
 
 # ── MT-R5: K=2 loose channel (easy regime) ───────────────────────────────────
 # Very high capacity: both tasks should operate near eta=1 (no compression).
@@ -163,6 +169,7 @@ submit_multi "MT-R4-weights" 2 \
 # With c_min=60k, ~35% of slots infeasible → tests infeasibility handling.
 #submit_multi "MT-R6-tight-Rk" 2 \
 #    60000 300000 20
+
 
 echo ""
 echo "All jobs submitted. Monitor with: squeue -u \$USER"

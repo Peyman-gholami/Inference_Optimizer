@@ -283,6 +283,7 @@ def make_repro_table(repro_rows: list) -> str:
         r"$\bm{\tau}$ (s) & $\bm{a}$ (bytes) \\"
     )
     lines.append(r"\midrule")
+
     for row in repro_rows:
         lines.append(row)
     lines.append(r"\bottomrule")
@@ -461,10 +462,16 @@ def main():
         table3_lines.extend(rows)
         table3_lines.append(r"\midrule")
 
+
+        print("\n---- Scenario: ", scenario)
+        print("\n---- Setting: ", setting)
+        print("\n---- T: ", T)
+        
+        
         if setting is not None:
             repro_rows.append(make_repro_row(scenario, setting, T))
 
-    # Remove trailing \midrule
+        # Remove trailing \midrule
     if table3_lines and table3_lines[-1] == r"\midrule":
         table3_lines.pop()
 
@@ -478,6 +485,8 @@ def main():
     table3.extend(table3_lines)
 
     # ── Assemble compact repro table ──────────────────────────────────────────
+
+
     repro_table = make_repro_table(repro_rows)
 
     output = "\n".join(table3) + "\n\n" + repro_table
