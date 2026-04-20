@@ -156,14 +156,19 @@ def fmt_bytes(v: float) -> str:
 def make_repro_row(scenario: str, setting: dict, T: int) -> str:
     """
     One row for the compact reproducibility table.
-    Columns: Scenario | Backend | c_min | c_max | R_k | T | seed |
-             η_min | μ | ε | σ | N | Samples (grad/plot) | τ (s) | a (bytes)
+
+    New column order (matches revised Table 1 layout):
+        Scenario | Backend | c_min | c_max | R_k | T | Stages |
+        tau (s) | a (bytes) | eta_min | mu | eps | sigma | N | Samples (grad/plot)
+
+    Stages = number of nodes = len(tau).
+    seed column removed.
+    tau and a moved before the algorithm-parameter columns.
     """
     backend = setting.get("backend", "?")
     c_min   = setting.get("c_min", 0)
     c_max   = setting.get("c_max", 0)
     R_k     = setting.get("R_k", 10.0)
-    seed    = setting.get("seed", "?")
     eta_min = setting.get("eta_min", "?")
     mu      = setting.get("no_csi_mu", "?")
     eps     = setting.get("no_csi_epsilon", "?")
@@ -176,47 +181,61 @@ def make_repro_row(scenario: str, setting: dict, T: int) -> str:
         fast   = setting.get("llm_fast_samples", "?")
         full   = setting.get("llm_full_samples", "?")
         n_subj = 6
-        fast_total = int(fast) * n_subj if str(fast).isdigit() else f"{fast}\\times6"
-        full_total = int(full) * n_subj if str(full).isdigit() else f"{full}\\times6"
-        samples = f"{fast_total} / {full_total}"
-        backend_str = f"LLM ({model})"
+        fast_total = int(fast) * n_subj if str(fast).isdigit() else str(fast) + "\\times6"
+        full_total = int(full) * n_subj if str(full).isdigit() else str(full) + "\\times6"
+        samples = str(fast_total) + " / " + str(full_total)
+        backend_str = "LLM (" + model + ")"
     elif backend == "resnet":
-        model  = "ResNet-56"
         sigma  = setting.get("resnet_grad_sigma", "?")
         N      = setting.get("resnet_grad_N", "?")
         fast_b = setting.get("resnet_fast_batches", 1)
         bsz    = setting.get("resnet_batch_size", 100)
         fast_total = int(fast_b) * int(bsz)
-        samples = f"{fast_total} / 10{{,}}000"
+        samples = str(fast_total) + " / 10{,}000"
         backend_str = "ResNet-56"
     else:
         sigma  = setting.get("mlp_sigma", "?")
         N      = setting.get("mlp_N", "?")
         n_samp = setting.get("mlp_n_samples", 512)
-        samples = f"{n_samp} / {n_samp}"
+        samples = str(n_samp) + " / " + str(n_samp)
         backend_str = "MLP/MNIST"
 
-    # tau and a
+    # tau: sorted by integer key so order matches node indices
     tau_dict = setting.get("tau", {})
-    tau_str  = "[" + ", ".join(f"{v:.4f}" for v in tau_dict.values()) + "]"
+    tau_vals = sorted(tau_dict.items(), key=lambda kv: int(kv[0]))
+    tau_str  = "[" + ", ".join("{:.4f}".format(float(v)) for _, v in tau_vals) + "]"
 
-    a_dict  = setting.get("a", {})
-    a_str   = "[" + ", ".join(fmt_bytes(v) for v in a_dict.values()) + "]"
+    # Stages = number of nodes = len(tau)
+    stages = len(tau_vals)
+
+    # a: sorted by integer key
+    a_dict = setting.get("a", {})
+    a_vals = sorted(a_dict.items(), key=lambda kv: int(kv[0]))
+    a_str  = "[" + ", ".join(fmt_bytes(float(v)) for _, v in a_vals) + "]"
 
     cols = [
         scenario, backend_str,
-        sci(c_min), sci(c_max), f"{R_k:.0f}",
-        str(T), str(seed),
+        sci(c_min), sci(c_max), "{:.0f}".format(R_k),
+        str(T), str(stages),
+        tau_str, a_str,
         str(eta_min), str(mu), str(eps),
         str(sigma), str(N),
         samples,
-        tau_str, a_str,
     ]
-    return " & ".join(cols) + r" \\"
+    return " & ".join(cols) + " \\\\"
+
 
 
 def make_repro_table(repro_rows: list) -> str:
-    """Wrap repro rows in a full table environment."""
+    """
+    Wrap repro rows in a full table environment.
+
+    Revised layout (matches Table 1 in the paper):
+        Scenario Parameters group: Scenario | Backend | c_min | c_max | R_k | T | Stages | τ (s) | a (bytes)
+        Algorithm Parameters group: η_min | μ | ε | σ | N | Samples (grad/plot)
+
+    seed column removed; Stages added; τ and a moved into Scenario Parameters.
+    """
     lines = []
     lines.append(r"\begin{table*}[t]")
     lines.append(r"\centering")
@@ -230,22 +249,29 @@ def make_repro_table(repro_rows: list) -> str:
         r"\begin{tabular}{@{}"
         r"l l "           # Scenario, Backend
         r"ccc "           # c_min, c_max, R_k
-        r"cc "            # T, seed
+        r"c "             # T
+        r"c "             # Stages
+        r"cc "            # tau, a
         r"ccc "           # eta_min, mu, eps
         r"cc "            # sigma, N
-        r"c "             # Samples
-        r"cc"             # tau, a
+        r"c"              # Samples
         r"@{}}"
     )
     lines.append(r"\toprule")
+    # Two-row header: group labels on top, column names below
+    lines.append(
+        r"\multicolumn{9}{c}{\textbf{Scenario Parameters}} & "
+        r"\multicolumn{6}{c}{\textbf{Algorithm Parameters}} \\"
+    )
+    lines.append(r"\cmidrule(lr){1-9}\cmidrule(lr){10-15}")
     lines.append(
         r"\textbf{Scenario} & \textbf{Backend} & "
         r"$\bm{c_{\min}}$ & $\bm{c_{\max}}$ & $\bm{R_k}$ & "
-        r"$\bm{T}$ & \textbf{seed} & "
+        r"$\bm{T}$ & \textbf{Stages} & "
+        r"$\bm{\tau}$ (s) & $\bm{a}$ (bytes) & "
         r"$\bm{\eta_{\min}}$ & $\bm{\mu}$ & $\bm{\varepsilon}$ & "
         r"$\bm{\sigma}$ & $\bm{N}$ & "
-        r"\textbf{Samples (grad/plot)} & "
-        r"$\bm{\tau}$ (s) & $\bm{a}$ (bytes) \\"
+        r"\textbf{Samples (grad/plot)} \\"
     )
     lines.append(r"\midrule")
     for row in repro_rows:
@@ -254,7 +280,6 @@ def make_repro_table(repro_rows: list) -> str:
     lines.append(r"\end{tabular}}")
     lines.append(r"\end{table*}")
     return "\n".join(lines)
-
 
 
 # ── Table 3 filling ───────────────────────────────────────────────────────────

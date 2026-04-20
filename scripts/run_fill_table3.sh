@@ -16,6 +16,21 @@ mkdir -p "$(dirname ${OUT_FILE})"
 
 python ${HOME_DIR}/fill_table3.py \
 \
+    --scenario "OF-Vision-Tgh-Nw" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/tight/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/tight/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/tight/llmint8" \
+\
+    --scenario "OF-Vision-Trs-Nw" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/transitional/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/transitional/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/transitional/llmint8" \
+\
+    --scenario "OF-Vision-Loo-Nw" \
+    --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/loose/topk" \
+    --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/loose/quantization" \
+    --int8  "${HOME_DIR}/outputs/single_experiments/group2/resnet_new/loose/llmint8" \
+\
     --scenario "OF-Vision-Tgh" \
     --topk  "${HOME_DIR}/outputs/single_experiments/group2/resnet_extra/tight/topk" \
     --quant "${HOME_DIR}/outputs/single_experiments/group2/resnet_new_quant/tight/quantization" \

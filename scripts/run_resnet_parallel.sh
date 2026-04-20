@@ -38,14 +38,14 @@ SIGMA=0.05
 GRAD_N=20
 
 # No-CSI
-MU=3.0
+MU=0.1
 EPSILON=0.1
 
 # eta_min (per link)
 ETA_MIN=0.125
 
 # Output directory prefix — compression method appended automatically
-OUT_PREFIX="${HOME_DIR}/outputs/single_experiments/group2/resnet_new_quant"
+OUT_PREFIX="${HOME_DIR}/outputs/single_experiments/group2/resnet_new"
 
 # Slurm
 TIME_LIMIT="2:00:00"
@@ -68,7 +68,7 @@ submit_experiment() {
     echo "  out: ${OUT_BASE}/{topk,quantization,llmint8}"
 
     #for COMP in topk quantization llmint8; do
-    for COMP in quantization; do
+    for COMP in   llmint8; do
         JOB=$(sbatch --parsable \
             --partition=gpu \
             --gres=gpu:h200:1 \
@@ -123,7 +123,7 @@ python ${HOME_DIR}/run_experiment.py --backend resnet \
 
 # ── Channel regime ────────────────────────────────────────────────────────────
 #C_MIN=40000;  C_MAX=100000;  R_K=10; submit_experiment "tight"
-#C_MIN=200000; C_MAX=600000;  R_K=10; submit_experiment "loose"
+C_MIN=200000; C_MAX=600000;  R_K=10; submit_experiment "loose"
 
 # ── R_k sensitivity (same channel, different throughput demand) ───────────────
 # Increasing R_k moves the feasibility boundary up — same channel becomes tight.
@@ -139,8 +139,8 @@ python ${HOME_DIR}/run_experiment.py --backend resnet \
 #MU=30.0; submit_experiment "transitional_mu30"
 
 # ── η_min sensitivity ─────────────────────────────────────────────────────────
-C_MIN=60000; C_MAX=300000; R_K=10; MU=3.0
-ETA_MIN=0.0;    submit_experiment "transitional_etamin0"
+#C_MIN=60000; C_MAX=300000; R_K=10; MU=3.0
+#ETA_MIN=0.0;    submit_experiment "transitional_etamin0"
 #ETA_MIN=0.0625; submit_experiment "transitional_etamin0p0625"
 #ETA_MIN=0.25;   submit_experiment "transitional_etamin0p25"
 #ETA_MIN=0.5;    submit_experiment "transitional_etamin0p5"

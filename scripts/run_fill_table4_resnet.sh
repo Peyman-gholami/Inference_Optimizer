@@ -16,10 +16,50 @@ mkdir -p "$(dirname ${OUT_FILE})"
 
 python ${HOME_DIR}/fill_table4_resnet.py \
 \
-    --scenario "OF-Vision-TGH" \
+    --scenario "MT-Vis1-Sym" \
     --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R1-sym/topk" \
     --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R1-sym/quantization" \
     --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R1-sym/llmint8" \
+\
+    --scenario "MT-Vis2-Hetero" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R2-hetero/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R2-hetero/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R2-hetero/llmint8" \
+\
+    --scenario "MT-Vis3-K3-Tight" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R3-K3-tight/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R3-K3-tight/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R3-K3-tight/llmint8" \
+\
+    --scenario "MT-Vis4-weights" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R4-weights/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R4-weights/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R4-weights/llmint8" \
+\
+    --scenario "MT-Vis5-loose-N10-T100" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R5-loose/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R5-loose/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R5-loose/llmint8" \
+\
+    --scenario "MT-Vis5-loose-N10-T50" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R5-loose-N10-T50/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R5-loose-N10-T50/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R5-loose-N10-T50/llmint8" \
+\
+    --scenario "MT-Vis6-tight-Rk-N10-T100" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R6-tight-Rk/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R6-tight-Rk/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R6-tight-Rk/llmint8" \
+\
+    --scenario "MT-Vis6-tight-Rk-N10-T50" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R6-tight-Rk-N10-T50/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R6-tight-Rk-N10-T50/quantization" \
+    --int8  "${HOME_DIR}/outputs/multi_experiments/resnet/MT-R6-tight-Rk-N10-T50/llmint8" \
+\
+    --scenario "MT-VisCross-R1" \
+    --topk  "${HOME_DIR}/outputs/multi_experiments/resnet_mlp/topk" \
+    --quant "${HOME_DIR}/outputs/multi_experiments/resnet_mlp/quantization" \
+    --int8 "${HOME_DIR}/outputs/multi_experiments/resnet_mlp/quantization" \
     --t_idx -1 \
     --out   "${OUT_FILE}"
 

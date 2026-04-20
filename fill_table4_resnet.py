@@ -188,99 +188,211 @@ def fmt_bytes(v: float) -> str:
     return str(int(v))
 
 
-def make_repro_row(scenario: str, setting: dict, T: int) -> str:
-    """
-    One row for the compact reproducibility table.
-    Columns: Scenario | Backend | c_min | c_max | R_k | T | seed |
-             η_min | μ | ε | σ | N | Samples (grad/plot) | τ (s) | a (bytes)
-    """
-    backend = setting.get("backend", "?")
-    c_min   = setting.get("c_min", 0)
-    c_max   = setting.get("c_max", 0)
-    R_k     = setting.get("R_k", 10.0)
-    seed    = setting.get("seed", "?")
-    eta_min = setting.get("eta_min", "?")
-    mu      = setting.get("no_csi_mu", "?")
-    eps     = setting.get("no_csi_epsilon", "?")
-
-    # Backend-specific fields
+def _backend_str(backend: str, setting: dict) -> str:
+    """Human-readable backend label for a single task."""
     if backend == "llm":
-        model  = setting.get("llm_model_name", "?").split("/")[-1]
+        model = setting.get("llm_model_name", "").split("/")[-1] or "LLM"
+        return f"LLM ({model})"
+    if backend == "resnet":
+        return "ResNet-56"
+    return "MLP/MNIST"
+
+
+def _per_task_sigma_N_samples(k_idx: int, backend: str, setting: dict) -> tuple:
+    """Return (sigma, N, samples_str) for task k_idx given its backend."""
+    if backend == "llm":
         sigma  = setting.get("llm_grad_sigma", "?")
         N      = setting.get("llm_grad_N", "?")
         fast   = setting.get("llm_fast_samples", "?")
         full   = setting.get("llm_full_samples", "?")
         n_subj = 6
-        fast_total = int(fast) * n_subj if str(fast).isdigit() else f"{fast}\\times6"
-        full_total = int(full) * n_subj if str(full).isdigit() else f"{full}\\times6"
-        samples = f"{fast_total} / {full_total}"
-        backend_str = f"LLM ({model})"
+        fast_t = int(fast) * n_subj if str(fast).isdigit() else f"{fast}\\times6"
+        full_t = int(full) * n_subj if str(full).isdigit() else f"{full}\\times6"
+        samples = f"{fast_t} / {full_t}"
     elif backend == "resnet":
-        model  = "ResNet-56"
         sigma  = setting.get("resnet_grad_sigma", "?")
         N      = setting.get("resnet_grad_N", "?")
         fast_b = setting.get("resnet_fast_batches", 1)
         bsz    = setting.get("resnet_batch_size", 100)
-        fast_total = int(fast_b) * int(bsz)
-        samples = f"{fast_total} / 10{{,}}000"
-        backend_str = "ResNet-56"
+        fast_t = int(fast_b) * int(bsz)
+        samples = f"{fast_t} / 10{{,}}000"
     else:
         sigma  = setting.get("mlp_sigma", "?")
         N      = setting.get("mlp_N", "?")
         n_samp = setting.get("mlp_n_samples", 512)
         samples = f"{n_samp} / {n_samp}"
-        backend_str = "MLP/MNIST"
+    return sigma, N, samples
 
-    # tau and a
+
+def _nested(items, fmt=str) -> str:
+    """Render a list as [[a, b, ...], [c, d, ...]] in LaTeX-friendly brackets."""
+    return "[" + ", ".join(fmt(v) for v in items) + "]"
+
+
+def _nested2(list_of_lists, fmt=str) -> str:
+    """Render a list-of-lists as [[a,b],[c,d]] style."""
+    inner = [_nested(sub, fmt) for sub in list_of_lists]
+    return "[" + ", ".join(inner) + "]"
+
+
+def make_repro_row(scenario: str, setting: dict, T: int) -> str:
+    """
+    One row for the compact multi-task reproducibility table (Table 4).
+
+    Columns:
+        Scenario | Backends | Num tasks | c_min | c_max | R_k | T |
+        Stages | τ (s) | a (bytes) | η_min | μ | ε | σ | N |
+        Samples (grad/plot)
+
+    Handles both single-backend mode (task_backends=[]) and cross-backend
+    mode (task_backends=[...]).  Per-task quantities are rendered as nested
+    bracket lists matching the style in the paper, e.g. [8, 6] or
+    [[0.008, 0.010], [0.013, 0.013]].
+    """
+    K            = int(setting.get("K", 1))
+    c_min        = setting.get("c_min", 0)
+    c_max        = setting.get("c_max", 0)
+    mu           = setting.get("no_csi_mu", "?")
+    eps          = setting.get("no_csi_epsilon", "?")
+
+    # ── Per-task R_k ──────────────────────────────────────────────────────────
+    R_k_list = setting.get("R_k_per_task", [])
+    if not R_k_list:
+        R_k_list = [setting.get("R_k", 10.0)] * K
+    R_k_str = _nested(R_k_list, lambda v: f"{float(v):.4g}")
+
+    # ── Backends ──────────────────────────────────────────────────────────────
+    task_backends = setting.get("task_backends", [])
+    if task_backends:
+        backends_per_task = list(task_backends)
+    else:
+        backends_per_task = [setting.get("backend", "resnet")] * K
+
+    backend_strs  = [_backend_str(b, setting) for b in backends_per_task]
+    backends_cell = "[" + ", ".join(backend_strs) + "]"
+
+    # ── Stages (L_k per task = num_nodes = num_links + 1) ─────────────────────
+    L_k = int(setting.get("L_k", setting.get("num_links", 2) + 1))
+    stages_list = [L_k] * K          # all tasks share the same topology
+    stages_str  = _nested(stages_list)
+
+    # ── τ per task: shared topology → same vector for every task ─────────────
     tau_dict = setting.get("tau", {})
-    tau_str  = "[" + ", ".join(f"{v:.4f}" for v in tau_dict.values()) + "]"
+    # tau keys may be stored as strings
+    tau_vals = [float(tau_dict[k]) for k in sorted(tau_dict, key=lambda x: int(x))]
+    tau_per_task  = [tau_vals] * K
+    tau_str = _nested2(tau_per_task, lambda v: f"{v:.4f}")
 
-    a_dict  = setting.get("a", {})
-    a_str   = "[" + ", ".join(fmt_bytes(v) for v in a_dict.values()) + "]"
+    # ── a per task: from task_a dict ──────────────────────────────────────────
+    task_a = setting.get("task_a", {})
+    a_per_task = []
+    for k_idx in range(K):
+        tid = str(k_idx + 1)
+        if tid in task_a:
+            a_sub = task_a[tid]
+            a_vals = [float(a_sub[ki]) for ki in sorted(a_sub, key=lambda x: int(x))]
+        else:
+            # Fallback: use a_base
+            a_base = setting.get("a_base", {})
+            a_vals = [float(a_base[ki]) for ki in sorted(a_base, key=lambda x: int(x))]
+        a_per_task.append(a_vals)
+    a_str = _nested2(a_per_task, fmt_bytes)
+
+    # ── η_min per task ────────────────────────────────────────────────────────
+    task_eta_mins = setting.get("task_eta_mins", [])
+    if task_eta_mins and len(task_eta_mins) == K:
+        eta_list = [float(v) for v in task_eta_mins]
+    else:
+        eta_list = [float(setting.get("eta_min", 0.125))] * K
+    eta_str = _nested(eta_list)
+
+    # ── σ, N, Samples per task ────────────────────────────────────────────────
+    sigma_list   = []
+    N_list       = []
+    samples_list = []
+    for k_idx, backend in enumerate(backends_per_task):
+        sigma, N, samples = _per_task_sigma_N_samples(k_idx, backend, setting)
+        sigma_list.append(str(sigma))
+        N_list.append(str(N))
+        samples_list.append(samples)
+
+    # If all tasks share the same values, render as a plain list; otherwise nested.
+    sigma_str   = _nested(sigma_list)
+    N_str       = _nested(N_list)
+    # Samples: render as nested pairs [[grad/plot], [grad/plot]]
+    samples_str = "[" + ", ".join(f"[{s}]" for s in samples_list) + "]"
 
     cols = [
-        scenario, backend_str,
-        sci(c_min), sci(c_max), f"{R_k:.0f}",
-        str(T), str(seed),
-        str(eta_min), str(mu), str(eps),
-        str(sigma), str(N),
-        samples,
-        tau_str, a_str,
+        scenario,
+        backends_cell,
+        str(K),
+        sci(c_min), sci(c_max),
+        R_k_str,
+        str(T),
+        stages_str,
+        tau_str,
+        a_str,
+        eta_str,
+        str(mu), str(eps),
+        sigma_str,
+        N_str,
+        samples_str,
     ]
     return " & ".join(cols) + r" \\"
 
 
 def make_repro_table(repro_rows: list) -> str:
-    """Wrap repro rows in a full table environment."""
+    """
+    Wrap repro rows in a full table environment matching Table 4 in the paper.
+
+    Columns:
+        Scenario | Backends | Num tasks | c_min | c_max | R_k | T |
+        Stages | τ (s) | a (bytes) | η_min | μ | ε | σ | N |
+        Samples (grad/plot)
+    """
     lines = []
     lines.append(r"\begin{table*}[t]")
     lines.append(r"\centering")
-    lines.append(r"\caption{Offline single-task experiment parameters. "
-                 r"Samples column shows gradient-oracle / plot evaluations. "
-                 r"Compression method varies per column group in Table~\ref{tab:results-offline-single}.}")
-    lines.append(r"\label{tab:repro-offline-single}")
+    lines.append(
+        r"\caption{Offline multi-task experiment parameters. "
+        r"Per-task quantities are listed in task order using nested brackets. "
+        r"Samples column shows gradient-oracle / plot evaluations per task.}"
+    )
+    lines.append(r"\label{tab:repro-offline-multi}")
     lines.append(r"\small")
     lines.append(r"\resizebox{\textwidth}{!}{%")
     lines.append(
         r"\begin{tabular}{@{}"
-        r"l l "           # Scenario, Backend
-        r"ccc "           # c_min, c_max, R_k
-        r"cc "            # T, seed
-        r"ccc "           # eta_min, mu, eps
-        r"cc "            # sigma, N
-        r"c "             # Samples
-        r"cc"             # tau, a
+        r"l "             # Scenario
+        r"l "             # Backends
+        r"c "             # Num tasks
+        r"cc "            # c_min, c_max
+        r"c "             # R_k  (per-task list)
+        r"c "             # T
+        r"c "             # Stages (per-task)
+        r"c "             # tau (nested per-task)
+        r"c "             # a   (nested per-task)
+        r"c "             # eta_min (per-task)
+        r"cc "            # mu, eps
+        r"cc "            # sigma, N (per-task)
+        r"c"              # Samples (nested per-task)
         r"@{}}"
     )
     lines.append(r"\toprule")
+    # Two-line header: top group labels, then individual column names
     lines.append(
-        r"\textbf{Scenario} & \textbf{Backend} & "
+        r"\multicolumn{3}{c}{\textbf{Scenario Parameters}} & "
+        r"\multicolumn{4}{c}{\textbf{Algorithm Parameters}} \\"
+    )
+    lines.append(r"\cmidrule(lr){1-3}\cmidrule(lr){4-7}")
+    lines.append(
+        r"\textbf{Scenario} & \textbf{Backends} & \textbf{Num tasks} & "
         r"$\bm{c_{\min}}$ & $\bm{c_{\max}}$ & $\bm{R_k}$ & "
-        r"$\bm{T}$ & \textbf{seed} & "
+        r"$\bm{T}$ & \textbf{Stages} & "
+        r"$\bm{\tau}$ (s) & $\bm{a}$ (bytes) & "
         r"$\bm{\eta_{\min}}$ & $\bm{\mu}$ & $\bm{\varepsilon}$ & "
         r"$\bm{\sigma}$ & $\bm{N}$ & "
-        r"\textbf{Samples (grad/plot)} & "
-        r"$\bm{\tau}$ (s) & $\bm{a}$ (bytes) \\"
+        r"\textbf{Samples (grad/plot)} \\"
     )
     lines.append(r"\midrule")
 
@@ -463,15 +575,11 @@ def main():
         table3_lines.append(r"\midrule")
 
 
-        print("\n---- Scenario: ", scenario)
-        print("\n---- Setting: ", setting)
-        print("\n---- T: ", T)
-        
-        
+        #print(setting)
         if setting is not None:
             repro_rows.append(make_repro_row(scenario, setting, T))
 
-        # Remove trailing \midrule
+    # Remove trailing \midrule
     if table3_lines and table3_lines[-1] == r"\midrule":
         table3_lines.pop()
 
