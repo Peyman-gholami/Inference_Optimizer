@@ -36,6 +36,32 @@ def _build_mmlu_prompt(
     return "\n\n".join(parts)
 
 
+def _load_mmlu_split(subject: str, split: str) -> List[Dict[str, Any]]:
+    """Load one (subject, split) of cais/mmlu as a list of row dicts.
+
+    The `easy` conda env ships a datasets/fsspec combo whose `load_dataset`
+    glob resolver chokes on the hub's `**` patterns ("Invalid pattern: '**'
+    can only be an entire path component"). To stay robust we pull the parquet
+    shard directly (same approach as experiments/mc_concavity.py for ShareGPT)
+    and only fall back to `load_dataset` if that fails. Parquet row order
+    matches `load_dataset`, so downstream seeded sampling is unchanged.
+    """
+    try:
+        import pandas as pd
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id="cais/mmlu",
+            filename=f"{subject}/{split}-00000-of-00001.parquet",
+            repo_type="dataset",
+        )
+        return pd.read_parquet(path).to_dict("records")
+    except Exception as exc:  # noqa: BLE001 - fall back to the datasets loader
+        print(f"[MMLUEvaluator] parquet load failed for {subject}/{split} "
+              f"({exc!r}); falling back to load_dataset.", flush=True)
+        from datasets import load_dataset  # type: ignore
+        return list(load_dataset("cais/mmlu", subject, split=split))
+
+
 @dataclass(frozen=True)
 class MMLUEvalConfig:
     subjects: Sequence[str]
@@ -73,9 +99,6 @@ class MMLUEvaluator:
                 f"per subject). Got n_shot={config.n_shot}."
             )
 
-        # Lazy import so base repo tests don't require HF datasets.
-        from datasets import load_dataset  # type: ignore
-
         rng = np.random.default_rng(config.seed)
 
         # ── Load per-subject dev examples for few-shot ────────────────────────
@@ -83,7 +106,7 @@ class MMLUEvaluator:
         dev_examples: Dict[str, List[Tuple[str, Sequence[str], int]]] = {}
         if config.n_shot > 0:
             for subj in config.subjects:
-                ds_dev = load_dataset("cais/mmlu", subj, split="dev")
+                ds_dev = _load_mmlu_split(subj, "dev")
                 dev_examples[subj] = [
                     (ds_dev[i]["question"],
                      ds_dev[i]["choices"],
@@ -97,7 +120,7 @@ class MMLUEvaluator:
         prompts: List[str] = []
         answers: List[int] = []
         for subj in config.subjects:
-            ds = load_dataset("cais/mmlu", subj, split="test")
+            ds = _load_mmlu_split(subj, "test")
             n = min(len(ds), int(config.samples_per_subject))
             idxs = rng.choice(len(ds), size=n, replace=False).tolist()
             shot_ex = dev_examples.get(subj, [])
