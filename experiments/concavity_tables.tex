@@ -1,0 +1,56 @@
+% Monte-Carlo concavity results — generated alongside experiments/CONCAVITY_RESULTS.md
+% Last updated 2026-06-13 (branch concavity-experiments).
+% MMLU rows are pooled over two seeds: topk = 300 rays, reserve = 135 (timed-out salvage).
+
+\begin{table}[t]
+  \centering
+  \caption{Monte-Carlo concavity of the task-quality function $f(\eta)$ over the
+  per-cut compression hypercube $[0,1]^n$. Phase-1 is isotropic sampling of the
+  whole cube; Phase-2 resamples inside the candidate sub-cube. $\eta_{\min}$
+  ``met'' indicates a sub-cube with $\geq\!95\%$ concave rays at $\geq\!30$ usable
+  rays; $c^\star$ is the smallest uniform floor $[c,1]^n$ meeting that bar.}
+  \label{tab:mc-concavity}
+  \begin{tabular}{llllccccc}
+    \toprule
+    Model & Task & Strategy & cuts & Phase-1 & Phase-2 & $\eta_{\min}\!\geq\!95\%$ & $c^\star$ \\
+    \midrule
+    gemma-2b     & ShareGPT ppl & topk    & 4 & 0.79          & \textbf{0.98} & yes & \textbf{0.10} \\
+    gemma-2b     & ShareGPT ppl & reserve & 4 & 0.58          & 0.88          & yes & 0.25 \\
+    gemma-2b     & ShareGPT ppl & topk    & 7 & 0.67          & 0.93          & yes & \textbf{0.10} \\
+    gemma-2b     & ShareGPT ppl & reserve & 7 & 0.39          & 0.67          & yes & 0.20 \\
+    gemma-7b     & ShareGPT ppl & topk    & 4 & 0.88          & 0.59          & no  & --- \\
+    gemma-7b     & ShareGPT ppl & reserve & 4 & 0.68          & 0.85          & yes & 0.25 \\
+    Llama-3.1-8B & WikiText ppl & topk    & 4 & \textbf{0.95} & \textbf{0.98} & yes & \textbf{0.05} \\
+    Llama-3.1-8B & WikiText ppl & reserve & 4 & 0.58          & 0.85          & yes & 0.30 \\
+    Llama-3.1-8B & MMLU acc     & topk    & 4 & 0.23          & ---           & no  & --- \\
+    Llama-3.1-8B & MMLU acc     & reserve & 4 & 0.385         & ---           & no  & $\geq$0.55 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{Smoothed concavity: concave-ray fraction after denoising each ray's
+  profile $y(t)$ with $k$ passes of a binomial $[1,2,1]/4$ low-pass on the interior
+  (endpoints fixed). \textbf{raw} reproduces the unsmoothed fraction; \textbf{sm1}
+  is the honest single-pass denoised value. MMLU's apparent non-concavity is
+  almost entirely measurement noise: one pass lifts it from ${\sim}0.23$ to
+  ${\sim}0.89$.}
+  \label{tab:smoothed-concavity}
+  \begin{tabular}{llllcccc}
+    \toprule
+    Model & Task & Strategy & cuts & raw & \textbf{sm1} & sm2 & $M$ \\
+    \midrule
+    Llama-3.1-8B & MMLU acc     & topk    & 4 & 0.230 & \textbf{0.893} & 0.980 & 300 \\
+    Llama-3.1-8B & MMLU acc     & reserve & 4 & 0.385 & \textbf{0.852} & 0.948 & 135 \\
+    Llama-3.1-8B & WikiText ppl & topk    & 4 & 0.957 & \textbf{0.983} & 0.991 & 230 \\
+    Llama-3.1-8B & WikiText ppl & reserve & 4 & 0.672 & \textbf{0.878} & 0.922 & 180 \\
+    gemma-2b     & ShareGPT ppl & topk    & 4 & 0.856 & \textbf{0.900} & 0.928 & 180 \\
+    gemma-2b     & ShareGPT ppl & topk    & 7 & 0.756 & \textbf{0.828} & 0.867 & 180 \\
+    gemma-2b     & ShareGPT ppl & reserve & 4 & 0.683 & \textbf{0.778} & 0.822 & 180 \\
+    gemma-2b     & ShareGPT ppl & reserve & 7 & 0.483 & \textbf{0.611} & 0.689 & 180 \\
+    gemma-7b     & ShareGPT ppl & topk    & 4 & 0.778 & \textbf{0.961} & 0.983 & 230 \\
+    gemma-7b     & ShareGPT ppl & reserve & 4 & 0.739 & \textbf{0.852} & 0.891 & 230 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
