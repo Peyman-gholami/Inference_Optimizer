@@ -335,6 +335,70 @@ def concavity_of(rays: List[dict]) -> Tuple[float, int]:
     return n_conc / len(rays), len(rays)
 
 
+def adaptive_fill_phase(
+    evaluate: Callable[[np.ndarray], float], rays: List[dict], n: int, *,
+    rng: np.random.Generator, min_box_samples: int, floor_step: float,
+    n_points: int, eps: float, min_seg: float, tol: float,
+    lo_full: np.ndarray, out_dir: Path, stem: str, checkpoint_every: int = 5,
+) -> List[dict]:
+    """Sample extra rays to ensure each floor level has >= min_box_samples usable rays.
+
+    Scans floor levels from high to low. For the highest under-sampled floor c,
+    samples rays from [c, 1]^n — they automatically count toward all lower floors too.
+    """
+    floors = np.round(np.arange(0.0, 0.9 + 1e-9, floor_step), 3)
+    fill_rays: List[dict] = []
+    all_rays = list(rays)
+
+    for c in reversed(floors):
+        v = np.full(n, float(c))
+        _, usable = concavity_fraction(all_rays, v, tol)
+        if usable >= min_box_samples:
+            continue
+        lo_fill = np.maximum(lo_full, v)
+        batch_idx = 0
+        while True:
+            _, usable = concavity_fraction(all_rays, v, tol)
+            if usable >= min_box_samples:
+                break
+            start, end = sample_random_ray(rng, n, lo=lo_fill, min_seg=min_seg)
+            start = np.clip(start, eps, 1.0)
+            end = np.clip(end, eps, 1.0)
+            ts, etas = ray_eta_points(start, end, n_points)
+            ys: List[float] = []
+            t0 = time.time()
+            for eta_vec in etas:
+                ys.append(evaluate(eta_vec))
+            sd = second_difference_test_on(ys, tol)
+            r = {
+                "id": len(fill_rays),
+                "start": [float(x) for x in start],
+                "end": [float(x) for x in end],
+                "t": [float(x) for x in ts],
+                "eta": [[float(x) for x in e] for e in etas],
+                "y": [float(x) for x in ys],
+                "concave": bool(sd["violations"] == 0),
+                "worst_d2": sd["worst_d2"],
+                "violations": sd["violations"],
+                "fill_floor": float(c),
+            }
+            fill_rays.append(r)
+            all_rays.append(r)
+            batch_idx += 1
+            print(f"  [fill c={c:.2f}] ray {batch_idx}  "
+                  f"concave={r['concave']}  worst_d2={sd['worst_d2']:+.4f}  "
+                  f"({time.time()-t0:.1f}s)  usable={usable}/{min_box_samples}",
+                  flush=True)
+            if batch_idx % checkpoint_every == 0:
+                cp = out_dir / f"{stem}_fill.partial.json"
+                cp.write_text(json.dumps(fill_rays))
+
+    if fill_rays:
+        cp = out_dir / f"{stem}_fill.partial.json"
+        cp.write_text(json.dumps(fill_rays))
+    return fill_rays
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Per-cut-point eta_min search  (model-free; operates on saved ray profiles)
 # ──────────────────────────────────────────────────────────────────────────
@@ -591,11 +655,12 @@ def cmd_run(args) -> None:
     slug = args.model.replace("/", "__")
     stem = f"{slug}__{args.dataset}__{args.metric}__{args.strategy}__cuts{args.n_cuts}"
 
-    def _write(rays, phase2_rays, em, phase2_em, final: bool):
+    def _write(rays, phase2_rays, em, phase2_em, final: bool, fill_rays=None):
         """Persist current results. Called after Phase 1 and again at the end so
         a walltime kill during Phase 2 still leaves Phase-1 results + eta_min."""
         (out_dir / f"{stem}_rays.json").write_text(json.dumps({
-            **summary, "rays": rays, "phase2_rays": phase2_rays}, indent=2))
+            **summary, "rays": rays, "phase2_rays": phase2_rays,
+            "fill_rays": fill_rays or []}, indent=2))
         s = dict(summary)
         if em is not None:
             s["eta_min_phase1"] = em
@@ -609,6 +674,7 @@ def cmd_run(args) -> None:
 
     rays: List[dict] = []
     phase2_rays: List[dict] = []
+    fill_rays: List[dict] = []
     em = None
     phase2_em = None
     try:
@@ -640,7 +706,7 @@ def cmd_run(args) -> None:
               f"(frac={em['frac_at_eta_min']}, usable={em['usable_at_eta_min']})",
               flush=True)
         # Persist Phase-1 results immediately (survives a Phase-2 timeout).
-        _write(rays, phase2_rays, em, None, final=False)
+        _write(rays, phase2_rays, em, None, final=False, fill_rays=fill_rays)
 
         # ── Phase 2: targeted resampling inside [eta_min_candidate, 1]^n ─────
         if args.phase2_rays > 0:
@@ -664,13 +730,26 @@ def cmd_run(args) -> None:
                   f"{np.round(phase2_em['eta_min'], 3).tolist()}  "
                   f"(frac={phase2_em['frac_at_eta_min']}, "
                   f"usable={phase2_em['usable_at_eta_min']})", flush=True)
+
+        # ── Adaptive fill: ensure min_box_samples usable rays per floor level ─
+        if args.min_box_samples > 0:
+            print(f"  -- Adaptive fill: min_box_samples={args.min_box_samples} "
+                  f"floor_step={args.adaptive_floor_step} --", flush=True)
+            fill_rays = adaptive_fill_phase(
+                evaluator.evaluate, rays + phase2_rays, args.n_cuts,
+                rng=rng, min_box_samples=args.min_box_samples,
+                floor_step=args.adaptive_floor_step, n_points=args.n_points,
+                eps=eps, min_seg=args.min_seg, tol=args.tol, lo_full=lo_full,
+                out_dir=out_dir, stem=stem)
+            summary["fill_n_rays"] = len(fill_rays)
+            print(f"  Adaptive fill added {len(fill_rays)} rays.", flush=True)
     finally:
         compressor.remove_hooks()
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    _write(rays, phase2_rays, em, phase2_em, final=True)
+    _write(rays, phase2_rays, em, phase2_em, final=True, fill_rays=fill_rays)
     print(f"Done. Wrote {stem}_rays.json / _summary.json / _rays.png to {out_dir}")
 
 
@@ -680,7 +759,7 @@ def cmd_run(args) -> None:
 
 def cmd_etamin(args) -> None:
     data = json.loads(Path(args.rays_json).read_text())
-    rays = data["rays"] + data.get("phase2_rays", [])
+    rays = data["rays"] + data.get("phase2_rays", []) + data.get("fill_rays", [])
     n = int(data["n_cuts"])
     em = find_eta_min(rays, n, tol=args.tol, target=args.target,
                       min_usable=args.min_usable)
@@ -726,6 +805,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Comma-separated MMLU subjects (default: 6-subject mix).")
     r.add_argument("--samples_per_subject", type=int, default=20)
     r.add_argument("--n_shot", type=int, default=5)
+    r.add_argument("--min_box_samples", type=int, default=30,
+                   help="Min usable rays per floor level; triggers adaptive fill (0 to disable).")
+    r.add_argument("--adaptive_floor_step", type=float, default=0.1,
+                   help="Floor-level grid spacing for adaptive fill check.")
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--out_dir", default=str(REPO_ROOT / "outputs" / "mc_concavity"))
     r.set_defaults(func=cmd_run)
