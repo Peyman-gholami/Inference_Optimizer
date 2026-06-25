@@ -91,7 +91,7 @@ python experiments/mc_concavity.py run \
     --n_cuts 4 --n_rays 150 --n_points 9 \
     --samples_per_subject 20 --n_shot 5 \
     --tol 0.02 --target 0.95 --min_usable 30 \
-    --min_box_samples 30 \
+    --min_box_samples 100 \
     --out_dir outputs/mc_concavity/llama_mmlu_topk
 ```
 
@@ -102,7 +102,7 @@ python experiments/mc_concavity.py run \
 | `--n_rays` | 150 | Phase-1 random rays sampled over the full hypercube [ε,1]^n |
 | `--n_points` | 7 | Grid points per ray (more = better D2 test, slower per ray) |
 | `--phase2_rays` | 80 | Targeted rays inside the eta_min candidate sub-cube (0 to skip) |
-| `--min_box_samples` | 30 | Min usable rays per floor level; triggers adaptive fill if fewer (0 to disable) |
+| `--min_box_samples` | 100 | Min **whole rays** per floor level whose clipped segment has ≥ 3 points; triggers adaptive fill if fewer (0 to disable) |
 | `--adaptive_floor_step` | 0.1 | Floor-level grid spacing for the adaptive fill check |
 | `--tol` | 0.001 | Second-difference (D2) tolerance; use 0.02 for accuracy tasks |
 | `--target` | 0.95 | Target concavity fraction for the eta_min search |
@@ -138,7 +138,7 @@ In `--out_dir`:
 
 ## Adaptive resampling (`--min_box_samples`)
 
-After Phase 1 and Phase 2, the **adaptive fill phase** ensures that each floor level `c` in `[0, 0.9]` has at least `min_box_samples` usable ray-segments (i.e., segments whose clipped portion inside `[c,1]^n` has ≥ 3 grid points).
+After Phase 1 and Phase 2, the **adaptive fill phase** ensures that each floor level `c` in `[0, 0.9]` has at least `min_box_samples` **whole rays** whose clipped segment inside `[c,1]^n` contains ≥ 3 grid points. A ray that only partially enters the box is either counted (if ≥ 3 of its `n_points` grid points satisfy `min(η) ≥ c`) or **discarded entirely** — there is no partial use of a ray's outside portion. The default target is 100 rays per floor level.
 
 The algorithm scans floor levels from **high to low**. For the highest under-sampled floor `c`, it samples new rays uniformly from `[c, 1]^n` and evaluates the metric on them. These fill rays automatically count toward all lower floors too (because a ray in `[c, 1]^n` is also in `[c', 1]^n` for c' ≤ c). The loop continues until all floors are adequately sampled.
 
@@ -267,4 +267,4 @@ outputs/mc_concavity/
 | Perplexity (WikiText/ShareGPT) | 150 | 7–9 | 0.001 | Smooth signal, tight tolerance works |
 | Accuracy (MMLU) | 150–200 | 9 | 0.02 | Discrete/noisy; use looser tolerance |
 
-For the Jensen analysis, `--samples_per_ray 200` with `--floor_step 0.05` gives a good resolution/noise tradeoff. Use `--min_box_samples 30` to ensure reliable estimates at each floor level (especially the high-floor regime where few rays naturally land).
+For the Jensen analysis, `--samples_per_ray 200` with `--floor_step 0.05` gives a good resolution/noise tradeoff. Use `--min_box_samples 100` to ensure reliable estimates at each floor level (especially the high-floor regime where few rays naturally land). Each unit of `min_box_samples` counts whole rays, not individual grid points.

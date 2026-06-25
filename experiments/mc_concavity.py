@@ -805,8 +805,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Comma-separated MMLU subjects (default: 6-subject mix).")
     r.add_argument("--samples_per_subject", type=int, default=20)
     r.add_argument("--n_shot", type=int, default=5)
-    r.add_argument("--min_box_samples", type=int, default=30,
-                   help="Min usable rays per floor level; triggers adaptive fill (0 to disable).")
+    r.add_argument("--min_box_samples", type=int, default=100,
+                   help="Min usable rays per floor level; triggers adaptive fill (0 to disable). "
+                        "'Usable' = whole rays whose clipped segment inside [c,1]^n has >= 3 grid points.")
     r.add_argument("--adaptive_floor_step", type=float, default=0.1,
                    help="Floor-level grid spacing for adaptive fill check.")
     r.add_argument("--seed", type=int, default=0)
