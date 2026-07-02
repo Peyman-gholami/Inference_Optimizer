@@ -8,14 +8,15 @@ This document describes how to run, reproduce, and interpret the concavity exper
 
 The concavity experiments test whether the task metric (perplexity or MMLU accuracy) is a **concave function** of the compression ratio vector **η ∈ [0,1]^n**. Concavity is a key theoretical property: if the metric is concave in η, then the naive independent-coordinate optimization over each cut point finds a global optimum (the per-cut search is guaranteed to be consistent).
 
-Four scripts implement complementary views of concavity:
+Five scripts implement complementary views of concavity:
 
 | Script | What it does | Model required? |
 |---|---|---|
 | `experiments/ray_concavity_score.py` | Fixed hand-designed rays (original test) | Yes |
-| `experiments/mc_concavity.py` | Monte-Carlo random rays (isotropic, main experiment) | Yes |
-| `experiments/jensen_concavity.py` | Jensen-inequality test on saved rays (post-hoc) | No |
+| `experiments/mc_concavity.py` | Monte-Carlo random rays (isotropic, main experiment); also has a standalone `fill` subcommand to top up under-sampled floor levels | Yes |
+| `experiments/jensen_concavity.py` | Jensen-inequality test on saved rays (post-hoc); one plot per task, one curve per strategy | No |
 | `experiments/smooth_concavity.py` | Same as MC but after low-pass smoothing (noise diagnosis) | No |
+| `experiments/plot_concavity_grid.py` | Grid version of the Jensen plot: one subplot per task, lines for every (strategy × tol) combo, mean ± std band from repeated small-sample triple draws | No |
 
 ---
 
@@ -144,6 +145,46 @@ The algorithm scans floor levels from **high to low**. For the highest under-sam
 
 Fill rays are saved under key `"fill_rays"` in `*_rays.json` and are automatically included by `jensen_concavity.py` and `etamin`.
 
+---
+
+## Standalone `fill` subcommand (top up an existing `*_rays.json`)
+
+The adaptive fill phase above runs automatically at the end of `mc_concavity.py run`. Use the `fill` subcommand to run **just** that phase against an already-saved `*_rays.json`/merged-rays file — e.g. after raising `min_box_samples`, or to keep sampling a task whose original run got killed by a walltime limit.
+
+```bash
+python experiments/mc_concavity.py fill \
+    --rays_json outputs/mc_concavity/meta-llama_Llama-3.1-8B/mmlu_accuracy/reserve_merged_rays.json \
+    --model meta-llama/Llama-3.1-8B --dataset mmlu --metric accuracy \
+    --strategy llmint8_reserve \
+    --tol 0.02 --min_box_samples 100 --adaptive_floor_step 0.1 \
+    --samples_per_subject 20 --n_shot 5 --max_length 512 --batch_size 16 \
+    --out_dir outputs/mc_concavity/meta-llama_Llama-3.1-8B/mmlu_accuracy
+```
+
+Key behavior:
+
+- **Resumable / safe to resubmit.** Progress checkpoints to `<stem>_fill.partial.json` every 5 rays. Re-running the exact same command picks up from that checkpoint (`base_rays` includes prior fill rays) instead of restarting.
+- **Skips floors that are already satisfied**, and if *every* floor already has ≥ `min_box_samples` usable rays it exits **before loading the model** ("All floors already have >= N usable rays ... Skipping model load") — so it's cheap to fire off repeatedly as a cron-style top-up.
+- Writes the merged result back to `<out_dir>/<stem>_rays.json` (same naming convention as `run`).
+
+### Batch-submitting fill jobs for the whole task matrix
+
+`scripts/run_mc_fill.sh` submits one 8h SLURM job per (model, dataset, strategy) combination in the task matrix, each running `fill` against its existing merged-rays file:
+
+```bash
+bash scripts/run_mc_fill.sh
+```
+
+### Chaining fill jobs across multiple 8h walltime windows
+
+Some (model, strategy) combos — especially `llmint8_reserve` on MMLU, ~3× slower per ray — don't reach `min_box_samples` within one 8h SLURM job. `scripts/run_mc_fill_chain.sh` submits a **SLURM dependency chain** (`--dependency=afterany:<prev_job_id>`) of several 8h `fill` jobs back-to-back for a given task, so it keeps resuming from the checkpoint until all floors are filled without manual resubmission:
+
+```bash
+bash scripts/run_mc_fill_chain.sh
+```
+
+Edit the `MAX_LINKS` variable (default 4) to change the chain length, and the `submit_chain` calls at the bottom to target a different task. Pass `FIRST_DEP=<job_id>` before a `submit_chain` call to have the chain start after an already-running job finishes, rather than launching immediately. Trailing links are cheap no-ops once every floor is satisfied (see the "skips floors" behavior above).
+
 Set `--min_box_samples 0` to disable adaptive fill entirely.
 
 ---
@@ -180,6 +221,44 @@ This script:
 |---|---|
 | `*__jensen_floor.png` | Jensen concavity vs eta-floor, one curve per strategy, ±1 SE shaded |
 | `jensen_concavity.json` | Full numerical results (sweep data per strategy) |
+
+---
+
+## Running `plot_concavity_grid.py` (grid of tasks × strategies × tol)
+
+`jensen_concavity.py` writes one PNG per task with one curve per strategy at a single, metric-appropriate `tol`. `plot_concavity_grid.py` builds on the same ray-discovery/merge machinery to answer a different question: **how much chord tolerance ("the little offset we allow to deviate from concavity") does each strategy need before its curve saturates?** It puts every task in one grid figure and sweeps several `tol` values per subplot.
+
+```bash
+python experiments/plot_concavity_grid.py \
+    --root outputs/mc_concavity \
+    --out outputs/mc_concavity/jensen/concavity_grid.png \
+    --tols 0.0 0.01 0.02 0.05 0.1 \
+    --samples_per_ray 5 --n_repeats 5 \
+    --floor_min 0.0 --floor_max 0.9 --floor_step 0.05 \
+    --seed 0
+```
+
+Layout: one subplot per task (`gemma-2b cuts4/cuts7`, `gemma-7b cuts4`, `Llama wikitext cuts4`, `Llama MMLU cuts4`), color = strategy (blue = `topk_per_token`, red = `llmint8_reserve`), line style = `tol` (solid → dotted as tol goes 0 → 0.1).
+
+### Variance band — repeated small-sample triple draws, not binomial SE
+
+Unlike `jensen_concavity.py` (which samples up to `--samples_per_ray` triples once, capped at *all* `C(m,3)` combinations, and shades ±1 binomial SE), this script deliberately samples only a **small fixed number of triples per ray** (`--samples_per_ray`, default 5) and repeats that draw **`--n_repeats` independent times** (default 5, each with a different RNG seed) per `(task, strategy, tol, floor)`. The plotted line is the **mean concavity across the 5 repeats**, and the shaded band is **±1 standard deviation across those repeats** — i.e. the band reflects sensitivity to *which* 5 triples happened to get sampled, not the usual binomial trial-count noise.
+
+### Key parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--tols` | `0.0 0.01 0.02 0.05 0.1` | Chord tolerances to sweep; one line style per value, shared across both strategies |
+| `--samples_per_ray` | 5 | Jensen triples drawn per ray per floor, per repeat |
+| `--n_repeats` | 5 | Independent resamples of `samples_per_ray` triples, used to compute the mean/std band |
+| `--floor_step` | 0.05 | Resolution of the eta-floor sweep |
+| `--seed` | 0 | Base RNG seed (repeat `i` uses `seed*1000 + i`) |
+
+### Output
+
+| File | Contents |
+|---|---|
+| `outputs/mc_concavity/jensen/concavity_grid.png` | Grid figure, one subplot per task, mean ± std band per (strategy, tol) |
 
 ---
 
@@ -254,8 +333,9 @@ outputs/mc_concavity/
 │   ├── *.partial.json       ← checkpoints (safe to delete after completion)
 │   └── *_fill.partial.json  ← adaptive fill checkpoint
 └── jensen/
-    ├── *__jensen_floor.png  ← Jensen concavity vs eta-floor (±1 SE shaded)
-    └── jensen_concavity.json
+    ├── *__jensen_floor.png    ← Jensen concavity vs eta-floor (±1 SE shaded)
+    ├── jensen_concavity.json
+    └── concavity_grid.png    ← grid: all tasks × strategies × tol (mean ± std band)
 ```
 
 ---

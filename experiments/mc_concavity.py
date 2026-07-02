@@ -613,11 +613,8 @@ def build_evaluator(args, *, model, tokenizer, compressor, device, n_cuts):
     raise ValueError(f"Unknown metric: {args.metric}")
 
 
-def cmd_run(args) -> None:
+def load_model_and_compressor(args):
     from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
@@ -644,7 +641,14 @@ def cmd_run(args) -> None:
         model, ActivationCompressionConfig(
             strategy=args.strategy, layer_indices=cuts, random_seed=args.seed),
     )
+    return device, tokenizer, model, compressor, cuts
 
+
+def cmd_run(args) -> None:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    device, tokenizer, model, compressor, cuts = load_model_and_compressor(args)
     rng = np.random.default_rng(args.seed)
     summary: dict = {
         "model": args.model, "dataset": args.dataset, "metric": args.metric,
@@ -754,6 +758,81 @@ def cmd_run(args) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# `fill` subcommand: standalone adaptive-fill pass on an existing *_rays.json.
+# Loads a model, tops up under-sampled floor levels only (skips floors that
+# already have >= min_box_samples usable rays, so it's safe to resubmit this
+# same job repeatedly / chain it across multiple walltime windows).
+# ──────────────────────────────────────────────────────────────────────────
+
+def cmd_fill(args) -> None:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    rays_path = Path(args.rays_json)
+    data = json.loads(rays_path.read_text())
+    args.n_cuts = int(data["n_cuts"])
+    base_rays = data["rays"] + data.get("phase2_rays", []) + data.get("fill_rays", [])
+
+    slug = args.model.replace("/", "__")
+    stem = f"{slug}__{args.dataset}__{args.metric}__{args.strategy}__cuts{args.n_cuts}"
+    fill_cp = out_dir / f"{stem}_fill.partial.json"
+    prior_fill: List[dict] = []
+    if fill_cp.exists():
+        prior_fill = json.loads(fill_cp.read_text())
+        base_rays = base_rays + prior_fill
+        print(f"  resuming: {len(prior_fill)} fill rays already on disk", flush=True)
+
+    eps = args.eps
+    lo_full = np.full(args.n_cuts, eps)
+    floors = np.round(np.arange(0.0, 0.9 + 1e-9, args.adaptive_floor_step), 3)
+    under_filled = []
+    for c in floors:
+        _, usable = concavity_fraction(base_rays, np.full(args.n_cuts, float(c)), args.tol)
+        if usable < args.min_box_samples:
+            under_filled.append((float(c), usable))
+    if not under_filled:
+        print(f"  All floors already have >= {args.min_box_samples} usable rays "
+              f"({len(base_rays)} base rays on disk). Skipping model load.", flush=True)
+        merged = dict(data)
+        merged["fill_rays"] = data.get("fill_rays", []) + prior_fill
+        (out_dir / f"{stem}_rays.json").write_text(json.dumps(merged, indent=2))
+        return
+    print(f"  Under-filled floors: {under_filled}", flush=True)
+
+    device, tokenizer, model, compressor, cuts = load_model_and_compressor(args)
+    rng = np.random.default_rng(args.seed)
+    try:
+        evaluator = build_evaluator(
+            args, model=model, tokenizer=tokenizer, compressor=compressor,
+            device=device, n_cuts=args.n_cuts)
+        print(f"  base rays={len(base_rays)}  target min_box_samples="
+              f"{args.min_box_samples}  floor_step={args.adaptive_floor_step}",
+              flush=True)
+        new_fill = adaptive_fill_phase(
+            evaluator.evaluate, base_rays, args.n_cuts,
+            rng=rng, min_box_samples=args.min_box_samples,
+            floor_step=args.adaptive_floor_step, n_points=args.n_points,
+            eps=eps, min_seg=args.min_seg, tol=args.tol, lo_full=lo_full,
+            out_dir=out_dir, stem=stem)
+    finally:
+        compressor.remove_hooks()
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    all_fill = prior_fill + new_fill
+    for i, r in enumerate(all_fill):
+        r["id"] = i
+    merged = dict(data)
+    merged["fill_rays"] = data.get("fill_rays", []) + all_fill
+    merged["n_cuts"] = args.n_cuts
+    out_path = out_dir / f"{stem}_rays.json"
+    out_path.write_text(json.dumps(merged, indent=2))
+    print(f"  Added {len(new_fill)} new fill rays this run "
+          f"({len(all_fill)} total fill rays). Wrote {out_path}", flush=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # `etamin` subcommand: model-free re-search on an existing *_rays.json
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -813,6 +892,31 @@ def parse_args(argv=None) -> argparse.Namespace:
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--out_dir", default=str(REPO_ROOT / "outputs" / "mc_concavity"))
     r.set_defaults(func=cmd_run)
+
+    f = sub.add_parser("fill", help="standalone adaptive-fill pass on an existing *_rays.json")
+    f.add_argument("--rays_json", required=True,
+                   help="Base *_rays.json to top up (also the output path).")
+    f.add_argument("--model", required=True)
+    f.add_argument("--dataset", required=True, choices=["wikitext", "sharegpt", "mmlu"])
+    f.add_argument("--metric", required=True, choices=["perplexity", "accuracy"])
+    f.add_argument("--strategy", default="topk_per_token",
+                   choices=["topk_per_token", "llmint8_reserve", "llmint8",
+                            "llmint8_adjacent", "magnitude", "random", "quantization"])
+    f.add_argument("--n_points", type=int, default=7)
+    f.add_argument("--eps", type=float, default=1e-3)
+    f.add_argument("--min_seg", type=float, default=0.05)
+    f.add_argument("--tol", type=float, default=1e-3)
+    f.add_argument("--max_texts", type=int, default=128)
+    f.add_argument("--max_length", type=int, default=512)
+    f.add_argument("--batch_size", type=int, default=1)
+    f.add_argument("--mmlu_subjects", default="")
+    f.add_argument("--samples_per_subject", type=int, default=20)
+    f.add_argument("--n_shot", type=int, default=5)
+    f.add_argument("--min_box_samples", type=int, default=100)
+    f.add_argument("--adaptive_floor_step", type=float, default=0.1)
+    f.add_argument("--seed", type=int, default=0)
+    f.add_argument("--out_dir", required=True)
+    f.set_defaults(func=cmd_fill)
 
     e = sub.add_parser("etamin", help="model-free eta_min search on a *_rays.json")
     e.add_argument("--rays_json", required=True)
