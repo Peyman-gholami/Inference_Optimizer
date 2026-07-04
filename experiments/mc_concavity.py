@@ -340,13 +340,14 @@ def adaptive_fill_phase(
     rng: np.random.Generator, min_box_samples: int, floor_step: float,
     n_points: int, eps: float, min_seg: float, tol: float,
     lo_full: np.ndarray, out_dir: Path, stem: str, checkpoint_every: int = 5,
+    floor_max: float = 0.9,
 ) -> List[dict]:
     """Sample extra rays to ensure each floor level has >= min_box_samples usable rays.
 
     Scans floor levels from high to low. For the highest under-sampled floor c,
     samples rays from [c, 1]^n — they automatically count toward all lower floors too.
     """
-    floors = np.round(np.arange(0.0, 0.9 + 1e-9, floor_step), 3)
+    floors = np.round(np.arange(0.0, floor_max + 1e-9, floor_step), 3)
     fill_rays: List[dict] = []
     all_rays = list(rays)
 
@@ -744,7 +745,7 @@ def cmd_run(args) -> None:
                 rng=rng, min_box_samples=args.min_box_samples,
                 floor_step=args.adaptive_floor_step, n_points=args.n_points,
                 eps=eps, min_seg=args.min_seg, tol=args.tol, lo_full=lo_full,
-                out_dir=out_dir, stem=stem)
+                out_dir=out_dir, stem=stem, floor_max=args.floor_max)
             summary["fill_n_rays"] = len(fill_rays)
             print(f"  Adaptive fill added {len(fill_rays)} rays.", flush=True)
     finally:
@@ -784,7 +785,7 @@ def cmd_fill(args) -> None:
 
     eps = args.eps
     lo_full = np.full(args.n_cuts, eps)
-    floors = np.round(np.arange(0.0, 0.9 + 1e-9, args.adaptive_floor_step), 3)
+    floors = np.round(np.arange(0.0, args.floor_max + 1e-9, args.adaptive_floor_step), 3)
     under_filled = []
     for c in floors:
         _, usable = concavity_fraction(base_rays, np.full(args.n_cuts, float(c)), args.tol)
@@ -813,7 +814,7 @@ def cmd_fill(args) -> None:
             rng=rng, min_box_samples=args.min_box_samples,
             floor_step=args.adaptive_floor_step, n_points=args.n_points,
             eps=eps, min_seg=args.min_seg, tol=args.tol, lo_full=lo_full,
-            out_dir=out_dir, stem=stem)
+            out_dir=out_dir, stem=stem, floor_max=args.floor_max)
     finally:
         compressor.remove_hooks()
         del model
@@ -884,6 +885,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Comma-separated MMLU subjects (default: 6-subject mix).")
     r.add_argument("--samples_per_subject", type=int, default=20)
     r.add_argument("--n_shot", type=int, default=5)
+    r.add_argument("--floor_max", type=float, default=0.9,
+                    help="Highest eta-floor level the adaptive fill targets.")
     r.add_argument("--min_box_samples", type=int, default=100,
                    help="Min usable rays per floor level; triggers adaptive fill (0 to disable). "
                         "'Usable' = whole rays whose clipped segment inside [c,1]^n has >= 3 grid points.")
@@ -912,6 +915,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     f.add_argument("--mmlu_subjects", default="")
     f.add_argument("--samples_per_subject", type=int, default=20)
     f.add_argument("--n_shot", type=int, default=5)
+    f.add_argument("--floor_max", type=float, default=0.9,
+                    help="Highest eta-floor level the adaptive fill targets.")
     f.add_argument("--min_box_samples", type=int, default=100)
     f.add_argument("--adaptive_floor_step", type=float, default=0.1)
     f.add_argument("--seed", type=int, default=0)

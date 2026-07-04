@@ -100,7 +100,10 @@ def main() -> None:
                     help="Independent resamples of samples_per_ray triples, used "
                          "to compute a mean +/- std band per curve.")
     ap.add_argument("--floor_min", type=float, default=0.0)
-    ap.add_argument("--floor_max", type=float, default=0.9)
+    ap.add_argument("--floor_max", type=float, default=0.7,
+                    help="Highest eta floor to plot. Defaults to 0.7: the "
+                         "adaptive fill guarantees >=min_box_samples usable rays "
+                         "only up to floor 0.7, so the sweep is unreliable above it.")
     ap.add_argument("--floor_step", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
