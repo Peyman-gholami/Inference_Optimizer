@@ -260,7 +260,7 @@ def compute_knn_surface(knn_model, eta1_grid, eta2_grid,
 '''
 PLOT_STYLE = {
     "font.family":      "serif",
-    "font.size":        12,
+    "font.size":        16,
     "axes.titlesize":   13,
     "axes.labelsize":   11,
     "xtick.labelsize":  9,
@@ -270,14 +270,13 @@ PLOT_STYLE = {
 '''
 PLOT_STYLE = {
     "font.family":      "serif",
-    "font.size":        16,
-    "axes.titlesize":   17,
-    "axes.labelsize":   15,
-    "xtick.labelsize":  13,
-    "ytick.labelsize":  13,
+    "font.size":        24,
+    "axes.titlesize":   30,
+    "axes.labelsize":   22,
+    "xtick.labelsize":  16,
+    "ytick.labelsize":  16,
     "figure.dpi":       150,
 }
-
 
 def _make_3d_ax(fig, pos, title, cmap="viridis", no_title=False):
     ax = fig.add_subplot(pos, projection="3d")
@@ -289,13 +288,13 @@ def _make_3d_ax(fig, pos, title, cmap="viridis", no_title=False):
 def _plot_surface(ax, E1, E2, Z, cmap, alpha=0.85, label_i=1, label_j=2):
     surf = ax.plot_surface(E1, E2, Z, cmap=cmap, alpha=alpha,
                            linewidth=0, antialiased=True)
-    ax.set_xlabel(f"η_{label_i}", labelpad=6)
-    ax.set_ylabel(f"η_{label_j}", labelpad=6)
+    ax.set_xlabel(f"$\\eta_{label_i}$", labelpad=6)
+    ax.set_ylabel(f"$\\eta_{label_j}$", labelpad=6)
     ax.set_zlabel("Accuracy", labelpad=6)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     return surf
-
+    
 
 def plot_surfaces(eta1_grid, eta2_grid, acc_matrix, knn_matrix, stein_matrix,
                   var_links, out_dir, backend, compressor,
@@ -355,7 +354,7 @@ def plot_surfaces(eta1_grid, eta2_grid, acc_matrix, knn_matrix, stein_matrix,
                         ax.plot_surface(XX, YY, ZZ, alpha=0.15,
                                         color='red', linewidth=0)
             fig.colorbar(surf, ax=ax, shrink=0.5, pad=0.1,
-                         label="Accuracy")
+                         label="")
             plt.tight_layout()
             path = os.path.join(out_dir, fname)
             plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -365,7 +364,7 @@ def plot_surfaces(eta1_grid, eta2_grid, acc_matrix, knn_matrix, stein_matrix,
         # ── Combined figure ───────────────────────────────────────────────────
         fig = plt.figure(figsize=(18, 6))
         if not no_title:
-            fig.suptitle(f"Accuracy surface — {tag}", fontsize=14, y=1.01)
+            fig.suptitle(f"Accuracy surface — {tag}", fontsize=30, y=1.01)
 
         for col, (title, Z, cmap, _) in enumerate(surfaces):
             ax = _make_3d_ax(fig, (1, 3, col + 1), title, cmap,

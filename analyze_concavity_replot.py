@@ -40,20 +40,14 @@ Usage
       --n_directions 5 \\
       --out_dir outputs/concavity_llm
 
-  # Replot only — read saved JSON, skip all computation, no titles, save as PDF
-  python analyze_concavity.py \\
-      --replot outputs/concavity_resnet/concavity_results.json \\
-      --out_dir outputs/concavity_resnet_pdf
-
 Output
 ------
   <out_dir>/
     concavity_results.json   — detected eta_min per link + all metrics
-    axis_profiles.png        — 1D accuracy slices per link
-    directional_profiles.png — accuracy along random rays
-    second_differences.png   — concavity test plots
-
-  In --replot mode the same three plots are saved as .pdf without titles.
+    axis_profiles.pdf        — 1D accuracy slices per link
+    directional_profiles.pdf — accuracy along random rays
+    second_differences.pdf   — concavity test plots
+    smoothed_accuracy.pdf    — KNN + Gaussian smoothed accuracy comparison
 """
 
 import argparse
@@ -65,9 +59,15 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter1d
 
 _root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _root)
+
+# Global font sizes
+FONT_SIZE_LABEL  = 22
+FONT_SIZE_TICK   = 20
+FONT_SIZE_LEGEND = 18
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ def load_accuracy_callable(args):
             no_csi_epsilon      = 0.1,
             llm_model_name      = "",
             llm_activation_strategy = "")
-    
+
         api, _ = load_backend(s)
         num_links = api.num_links
         return api.accuracy_callable_true, num_links
@@ -222,47 +222,82 @@ def run_concavity_scan(accuracy_fn, num_links, n_grid, n_repeat,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 3: Directional profiles (your idea)
+# Test 3: Directional profiles
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_directional_profiles(accuracy_fn, num_links, n_grid, n_repeat,
-                              n_directions, rng_seed=42):
+                              n_directions,
+                              ray_start_max=0.25,
+                              ray_end_min=0.75, ray_end_max=1.0,
+                              rng_seed=42):
     """
-    Sample n_directions rays from eta_start to [1,...,1].
-    eta_start is random — one direction goes from [0,...,0] (always included),
-    others have random starting points.
+    Sample n_directions rays, each with its own random start and end point.
+
+    Ray d is parameterised as
+        eta(s) = eta_start^(d) + s * (eta_end^(d) - eta_start^(d)),  s in [0,1]
+
+    The first ray always goes from boldsymbol{0} to boldsymbol{1}.
+    Remaining starts are sampled from [0, ray_start_max]^L and ends from
+    [ray_end_min, ray_end_max]^L.
+
+    Parameters
+    ----------
+    ray_start_max : float
+        Upper bound of the uniform distribution for start points (per link).
+    ray_end_min, ray_end_max : float
+        Range of the uniform distribution for end points (per link).
 
     Returns
     -------
     s_grid       : (n_grid,) parameterisation values in [0,1]
     ray_starts   : (n_directions, num_links)
+    ray_ends     : (n_directions, num_links)
     ray_profiles : (n_directions, n_grid)
     """
     rng = np.random.default_rng(rng_seed)
     s_grid = np.linspace(0.0, 1.0, n_grid)
 
-    # First direction: from [0,...,0] to [1,...,1]
+    # First ray: boldsymbol{0} -> boldsymbol{1}
     ray_starts = [np.zeros(num_links)]
-    # Remaining: random starting points
+    ray_ends   = [np.ones(num_links)]
+    # Remaining rays: random starts and ends
     for _ in range(n_directions - 1):
-        start = rng.uniform(0.0, 0.5, size=num_links)
-        ray_starts.append(start)
+        ray_starts.append(rng.uniform(0.0, ray_start_max, size=num_links))
+        ray_ends.append(rng.uniform(ray_end_min, ray_end_max, size=num_links))
     ray_starts = np.array(ray_starts)
+    ray_ends   = np.array(ray_ends)
+    ray_starts = np.array([np.array([0,0,0]),np.array([0.1,0,0]),np.array([0.1,0.1,0]),np.array([0.1,0.1,0.1])])
+    ray_ends = np.array([np.array([1,1,1]),np.array([0.5,1,1]),np.array([0.5,0.5,1]),np.array([1,1,1])])
+
 
     ray_profiles = np.zeros((n_directions, n_grid))
 
     print(f"\n[Test 3] Directional profiles ({n_directions} rays)", flush=True)
-    for d, start in enumerate(ray_starts):
-        print(f"  Ray {d} start={np.round(start, 2)}:", end="", flush=True)
+    for d in range(n_directions):
+        start, end = ray_starts[d], ray_ends[d]
+        print(f"  Ray {d}  start={np.round(start, 2)}  end={np.round(end, 2)}:",
+              end="", flush=True)
         for j, s in enumerate(s_grid):
-            eta_vec = start + s * (1.0 - start)   # moves from start to [1,...,1]
+            eta_vec = start + s * (end - start)
             eta_vec = np.clip(eta_vec, 0.0, 1.0)
             vals = [accuracy_fn(eta_vec) for _ in range(n_repeat)]
             ray_profiles[d, j] = float(np.mean(vals))
             print(".", end="", flush=True)
         print(flush=True)
 
-    return s_grid, ray_starts, ray_profiles
+    return s_grid, ray_starts, ray_ends, ray_profiles
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plotting helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _style_ax(ax):
+    """Apply consistent large-font styling to an axes object."""
+    ax.tick_params(axis="both", labelsize=FONT_SIZE_TICK)
+    ax.xaxis.label.set_size(FONT_SIZE_LABEL)
+    ax.yaxis.label.set_size(FONT_SIZE_LABEL)
+    ax.legend(fontsize=FONT_SIZE_LEGEND)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,39 +305,32 @@ def run_directional_profiles(accuracy_fn, num_links, n_grid, n_repeat,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_axis_profiles(eta_grid, profiles, eta_min_mono, eta_min_conc,
-                       eta_min_final, out_dir, backend, compressor,
-                       no_title=False, save_pdf=False):
-    ext = "pdf" if save_pdf else "png"
+                       eta_min_final, out_dir, backend, compressor):
     num_links = profiles.shape[0]
     fig, axes = plt.subplots(1, num_links, figsize=(6*num_links, 5),
                              squeeze=False)
     for link in range(num_links):
         ax = axes[0, link]
-        ax.plot(eta_grid, profiles[link], "b-o", ms=4, label="A_true")
+        ax.plot(eta_grid, profiles[link], "b-o", ms=4, label="$A_\\mathrm{true}$")
         ax.axvline(eta_min_mono[link], color="orange", ls="--",
-                   label=f"η_min mono={eta_min_mono[link]:.3f}")
+                   label=f"$\\eta_\\min$ mono={eta_min_mono[link]:.3f}")
         ax.axvline(eta_min_conc[link], color="red", ls="--",
-                   label=f"η_min conc={eta_min_conc[link]:.3f}")
+                   label=f"$\\eta_\\min$ conc={eta_min_conc[link]:.3f}")
         ax.axvline(eta_min_final[link], color="green", ls="-", lw=2,
-                   label=f"η_min final={eta_min_final[link]:.3f}")
-        ax.set_xlabel("η (link axis)")
-        ax.set_ylabel("A_true")
-        if not no_title:
-            ax.set_title(f"Link {link} — axis sweep\n"
-                         f"{backend}/{compressor}")
-        ax.legend(fontsize=8)
+                   label=f"$\\eta_\\min$ final={eta_min_final[link]:.3f}")
+        ax.set_xlabel("$\\eta$ (link axis)")
+        ax.set_ylabel("$A_\\mathrm{true}$")
         ax.grid(True, alpha=0.3)
+        _style_ax(ax)
     plt.tight_layout()
-    path = os.path.join(out_dir, f"axis_profiles.{ext}")
-    plt.savefig(path, dpi=120)
+    path = os.path.join(out_dir, "axis_profiles.pdf")
+    plt.savefig(path)
     plt.close()
     print(f"  Saved: {path}", flush=True)
 
 
 def plot_second_differences(eta_grid, d2, eta_min_conc,
-                            out_dir, backend, compressor,
-                            no_title=False, save_pdf=False):
-    ext = "pdf" if save_pdf else "png"
+                            out_dir, backend, compressor):
     num_links = d2.shape[0]
     inner_etas = eta_grid[1:-1]
     fig, axes = plt.subplots(1, num_links, figsize=(6*num_links, 4),
@@ -312,58 +340,106 @@ def plot_second_differences(eta_grid, d2, eta_min_conc,
         ax.plot(inner_etas, d2[link], "b-o", ms=4)
         ax.axhline(0, color="k", ls="-", lw=0.8)
         ax.axvline(eta_min_conc[link], color="red", ls="--",
-                   label=f"η_min={eta_min_conc[link]:.3f}")
+                   label=f"$\\eta_\\min$={eta_min_conc[link]:.3f}")
         ax.fill_between(inner_etas, d2[link], 0,
                         where=d2[link] > 0, alpha=0.3, color="red",
                         label="concavity violation")
-        ax.set_xlabel("η")
-        ax.set_ylabel("D²A (>0 = concavity violated)")
-        if not no_title:
-            ax.set_title(f"Link {link} — second differences\n"
-                         f"{backend}/{compressor}")
-        ax.legend(fontsize=8)
+        ax.set_xlabel("$\\eta$")
+        ax.set_ylabel("$D^2 A$ (>0 = concavity violated)")
         ax.grid(True, alpha=0.3)
+        _style_ax(ax)
     plt.tight_layout()
-    path = os.path.join(out_dir, f"second_differences.{ext}")
-    plt.savefig(path, dpi=120)
+    path = os.path.join(out_dir, "second_differences.pdf")
+    plt.savefig(path)
     plt.close()
     print(f"  Saved: {path}", flush=True)
 
 
-def plot_directional_profiles(s_grid, ray_starts, ray_profiles,
-                               eta_min_final, out_dir, backend, compressor,
-                               no_title=False, save_pdf=False):
-    ext = "pdf" if save_pdf else "png"
-    fig, ax = plt.subplots(figsize=(8, 5))
+def plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
+                               eta_min_final, out_dir, backend, compressor):
+    fig, ax = plt.subplots(figsize=(9, 5))
     cmap = plt.get_cmap("tab10")
+
+    def _vec_str(v):
+        """Format a vector as a compact LaTeX tuple, e.g. (0.12, 0.08)."""
+        inner = ",\,".join(f"{x:.2f}" for x in v)
+        return "(" + inner + ")"
+
     for d in range(len(ray_starts)):
-        label = (f"ray {d}: start={np.round(ray_starts[d], 2)}")
+        start_str = _vec_str(ray_starts[d])
+        end_str   = _vec_str(ray_ends[d])
+        label = (
+            r"$\boldsymbol{\eta}^{(" + str(d) + r")}_{\mathrm{start}}=" + start_str + r"$"
+            r", $\boldsymbol{\eta}^{(" + str(d) + r")}_{\mathrm{end}}=" + end_str + r"$"
+        )
         ax.plot(s_grid, ray_profiles[d], "-o", ms=3,
                 color=cmap(d % 10), label=label)
 
-    # Mark where each ray crosses eta_min_final on all links
-    # s_cross = max over links of (eta_min_final[i] - start[i]) / (1 - start[i])
-    for d in range(len(ray_starts)):
-        start = ray_starts[d]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            s_vals = np.where(
-                1.0 - start > 1e-6,
-                (eta_min_final - start) / (1.0 - start),
-                0.0
-            )
-        s_cross = float(np.max(np.clip(s_vals, 0, 1)))
-        ax.axvline(s_cross, color=cmap(d % 10), ls=":", alpha=0.5)
+    # Vertical marker at s* where the ray enters the informative regime
+    any_vline = np.any(eta_min_final > 0)
+    if any_vline:
+        for d in range(len(ray_starts)):
+            start, end = ray_starts[d], ray_ends[d]
+            span = end - start
+            with np.errstate(divide="ignore", invalid="ignore"):
+                s_vals = np.where(
+                    np.abs(span) > 1e-6,
+                    (eta_min_final - start) / span,
+                    0.0
+                )
+            s_cross = float(np.max(np.clip(s_vals, 0, 1)))
+            ax.axvline(s_cross, color=cmap(d % 10), ls=":", alpha=0.5,
+                       label=r"$s^*$ ray " + str(d) + f"={s_cross:.2f}")
 
-    ax.set_xlabel("s (ray parameter: 0=start, 1=[1,...,1])")
-    ax.set_ylabel("A_true")
-    if not no_title:
-        ax.set_title(f"Directional profiles — {backend}/{compressor}\n"
-                     f"(dotted vertical = estimated η_min crossing)")
-    ax.legend(fontsize=7, loc="lower right")
+    ax.set_xlabel(r"$s$ (ray parameter)")
+    ax.set_ylabel(r"$A_{\mathrm{true}}(\boldsymbol{\eta}(s))$")
     ax.grid(True, alpha=0.3)
+    _style_ax(ax)
     plt.tight_layout()
-    path = os.path.join(out_dir, f"directional_profiles.{ext}")
-    plt.savefig(path, dpi=120)
+    path = os.path.join(out_dir, "directional_profiles.pdf")
+    plt.savefig(path)
+    plt.close()
+    print(f"  Saved: {path}", flush=True)
+
+
+def plot_smoothed_accuracy(eta_grid, profiles, eta_min_final,
+                           out_dir, backend, compressor,
+                           knn_k=3, gauss_sigma=1.5):
+    """
+    For each link, plot raw accuracy together with KNN-smoothed and
+    Gaussian-smoothed versions for comparison.
+
+    knn_k      : window half-width for KNN (box) smoothing
+    gauss_sigma: sigma (in grid-point units) for Gaussian smoothing
+    """
+    num_links = profiles.shape[0]
+    fig, axes = plt.subplots(1, num_links, figsize=(6*num_links, 5),
+                             squeeze=False)
+    for link in range(num_links):
+        ax = axes[0, link]
+        raw = profiles[link]
+
+        # KNN / box smoothing (moving average with window 2k+1)
+        k = knn_k
+        knn_smoothed = np.convolve(raw, np.ones(2*k+1)/(2*k+1), mode="same")
+
+        # Gaussian smoothing
+        gauss_smoothed = gaussian_filter1d(raw, sigma=gauss_sigma)
+
+        ax.plot(eta_grid, raw,           "gray",  lw=1,   alpha=0.6, label="raw")
+        ax.plot(eta_grid, knn_smoothed,  "b-",    lw=1.5, label=f"KNN (k={k})")
+        ax.plot(eta_grid, gauss_smoothed,"r-",    lw=1.5,
+                label=f"Gaussian ($\\sigma$={gauss_sigma})")
+        ax.axvline(eta_min_final[link], color="green", ls="-", lw=2,
+                   label=f"$\\eta_\\min$={eta_min_final[link]:.3f}")
+        ax.set_xlabel("$\\eta$ (link axis)")
+        ax.set_ylabel("$A_\\mathrm{true}$")
+        ax.grid(True, alpha=0.3)
+        _style_ax(ax)
+
+    plt.tight_layout()
+    path = os.path.join(out_dir, "smoothed_accuracy.pdf")
+    plt.savefig(path)
     plt.close()
     print(f"  Saved: {path}", flush=True)
 
@@ -381,11 +457,8 @@ def build_eta_grid(n_grid, compressor, quantization_aware=False):
     For quantization with quantization_aware=True: non-uniform grid that
     densely samples around the known precision transition thresholds
     (INT4->INT8 at eta~0.25-0.375, INT8->FP16 at eta~0.5-0.625).
-    Missing these transitions at coarse uniform spacing is the main reason
-    quantization sweeps appear as flat straight lines.
     """
     if quantization_aware and "quant" in compressor.lower():
-        # Dense clusters around transition points + uniform background
         transitions = [0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625, 0.625]
         delta = 0.04
         cluster_pts = []
@@ -402,6 +475,7 @@ def build_eta_grid(n_grid, compressor, quantization_aware=False):
     else:
         return np.linspace(0.0, 1.0, n_grid)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,7 +491,7 @@ def main():
                    help="Grid points per axis for 1D sweeps.")
     p.add_argument("--n_repeat",           type=int, default=3,
                    help="Repeated evaluations per point (for noise reduction).")
-    p.add_argument("--n_directions",       type=int, default=10,
+    p.add_argument("--n_directions",       type=int, default=4,
                    help="Number of random rays for directional profiles.")
     p.add_argument("--noise_threshold",    type=float, default=0.005,
                    help="Minimum slope to be considered 'increasing' in Test 1.")
@@ -432,56 +506,28 @@ def main():
                    help="Use non-uniform grid that densely samples around "
                         "quantization precision transition points "
                         "(INT4/INT8/FP16). Recommended for --compressor quantization.")
-    p.add_argument("--replot", default=None, metavar="JSON_PATH",
-                   help="Path to a saved concavity_results.json.  Skips ALL "
-                        "computation and re-generates the three plots without "
-                        "titles, saved as PDF files.  --out_dir is still required.")
+    p.add_argument("--gauss_sigma",        type=float, default=1.5,
+                   help="Sigma (in grid-point units) for Gaussian smoothing "
+                        "in the smoothed_accuracy plot.")
+    p.add_argument("--knn_k",              type=int, default=3,
+                   help="Half-window for KNN/box smoothing in smoothed_accuracy plot.")
     p.add_argument("--out_dir",            default="outputs/concavity")
+    p.add_argument("--ray_start_max",      type=float, default=0.25,
+                   help="Upper bound for random ray start points (per link), "
+                        "sampled from [0, ray_start_max]. Default 0.25.")
+    p.add_argument("--ray_end_min",        type=float, default=0.75,
+                   help="Lower bound for random ray end points (per link), "
+                        "sampled from [ray_end_min, ray_end_max]. Default 0.75.")
+    p.add_argument("--ray_end_max",        type=float, default=1.0,
+                   help="Upper bound for random ray end points (per link). "
+                        "Default 1.0. First ray always ends at [1,...,1].")
+    p.add_argument("--only_directions",    action="store_true",
+                   help="Skip Tests 1 & 2 and only run Test 3 "
+                        "(directional profiles). Fast — use when you only "
+                        "need the ray plot.")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-
-    # ── Replot-only mode ─────────────────────────────────────────────────────
-    if args.replot:
-        print(f"\n[--replot] Loading saved results from {args.replot} ...",
-              flush=True)
-        with open(args.replot) as f:
-            results = json.load(f)
-
-        backend    = results["backend"]
-        compressor = results["compressor"]
-
-        eta_grid_1   = np.array(results["axis_profiles"]["eta_grid"])
-        profiles_1   = np.array(results["axis_profiles"]["profiles"])
-        eta_min_mono = np.array(results["eta_min_monotonicity"])
-        eta_min_conc = np.array(results["eta_min_concavity"])
-        eta_min_final = np.array(results["eta_min_recommended"])
-
-        # Reconstruct second differences from the saved axis profiles
-        n_pts = len(eta_grid_1)
-        num_links = profiles_1.shape[0]
-        d2 = np.zeros((num_links, n_pts - 2))
-        for link in range(num_links):
-            p = profiles_1[link]
-            for j in range(1, n_pts - 1):
-                d2[link, j-1] = p[j-1] + p[j+1] - 2*p[j]
-
-        s_grid       = np.array(results["directional_profiles"]["s_grid"])
-        ray_starts   = np.array(results["directional_profiles"]["ray_starts"])
-        ray_profiles = np.array(results["directional_profiles"]["ray_profiles"])
-
-        print("\nGenerating plots (no titles, PDF) ...", flush=True)
-        plot_axis_profiles(eta_grid_1, profiles_1, eta_min_mono, eta_min_conc,
-                           eta_min_final, args.out_dir, backend, compressor,
-                           no_title=True, save_pdf=True)
-        plot_second_differences(eta_grid_1, d2, eta_min_conc,
-                                args.out_dir, backend, compressor,
-                                no_title=True, save_pdf=True)
-        plot_directional_profiles(s_grid, ray_starts, ray_profiles,
-                                  eta_min_final, args.out_dir, backend, compressor,
-                                  no_title=True, save_pdf=True)
-        print(f"\nAll outputs in: {args.out_dir}", flush=True)
-        return
 
     print("="*60, flush=True)
     print("Concavity Analysis — eta_min detection", flush=True)
@@ -489,6 +535,7 @@ def main():
     print(f"  compressor = {args.compressor}", flush=True)
     print(f"  n_grid     = {args.n_grid}  n_repeat={args.n_repeat}", flush=True)
     print(f"  n_dirs     = {args.n_directions}", flush=True)
+    print(f"  only_directions = {args.only_directions}", flush=True)
     print(f"  quantization_aware = {args.quantization_aware}", flush=True)
     print("="*60, flush=True)
 
@@ -496,6 +543,43 @@ def main():
     print("\nLoading backend ...", flush=True)
     accuracy_fn, num_links = load_accuracy_callable(args)
     print(f"  num_links = {num_links}", flush=True)
+
+    # ── Test 3 only ───────────────────────────────────────────────────────────
+    if args.only_directions:
+        s_grid, ray_starts, ray_ends, ray_profiles = run_directional_profiles(
+            accuracy_fn, num_links,
+            n_grid=args.n_grid, n_repeat=args.n_repeat,
+            n_directions=args.n_directions,
+            ray_start_max=args.ray_start_max,
+            ray_end_min=args.ray_end_min,
+            ray_end_max=args.ray_end_max,
+        )
+
+        results = {
+            "backend":    args.backend,
+            "compressor": args.compressor,
+            "num_links":  num_links,
+            "directional_profiles": {
+                "s_grid":       s_grid.tolist(),
+                "ray_starts":   ray_starts.tolist(),
+                "ray_ends":     ray_ends.tolist(),
+                "ray_profiles": ray_profiles.tolist(),
+            },
+        }
+        json_path = os.path.join(args.out_dir, "directional_results.json")
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\n  Saved results: {json_path}", flush=True)
+
+        print("\nGenerating plots ...", flush=True)
+        eta_min_placeholder = np.zeros(num_links)
+        plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
+                                  eta_min_placeholder,
+                                  args.out_dir, args.backend, args.compressor)
+        print("\nDone.", flush=True)
+        return
+
+    # ── Full run: Tests 1, 2, 3 ───────────────────────────────────────────────
 
     # Build eta grid — non-uniform for quantization if requested
     eta_grid_shared = build_eta_grid(
@@ -524,10 +608,13 @@ def main():
     print(f"\n  [Test 2] eta_min_conc = {np.round(eta_min_conc, 4)}", flush=True)
 
     # ── Test 3: Directional profiles ─────────────────────────────────────────
-    s_grid, ray_starts, ray_profiles = run_directional_profiles(
+    s_grid, ray_starts, ray_ends, ray_profiles = run_directional_profiles(
         accuracy_fn, num_links,
         n_grid=args.n_grid, n_repeat=args.n_repeat,
         n_directions=args.n_directions,
+        ray_start_max=args.ray_start_max,
+        ray_end_min=args.ray_end_min,
+        ray_end_max=args.ray_end_max,
     )
 
     # ── Final recommendation ──────────────────────────────────────────────────
@@ -569,6 +656,7 @@ def main():
         "directional_profiles": {
             "s_grid":       s_grid.tolist(),
             "ray_starts":   ray_starts.tolist(),
+            "ray_ends":     ray_ends.tolist(),
             "ray_profiles": ray_profiles.tolist(),
         },
     }
@@ -579,17 +667,32 @@ def main():
 
     # ── Plots ─────────────────────────────────────────────────────────────────
     print("\nGenerating plots ...", flush=True)
-    plot_axis_profiles(eta_grid_1, profiles_1, eta_min_mono, eta_min_conc,
-                       eta_min_final, args.out_dir,
-                       args.backend, args.compressor,
-                       no_title=False, save_pdf=False)
-    plot_second_differences(eta_grid_2, d2, eta_min_conc,
-                            args.out_dir, args.backend, args.compressor,
-                            no_title=False, save_pdf=False)
-    plot_directional_profiles(s_grid, ray_starts, ray_profiles,
-                              eta_min_final, args.out_dir,
-                              args.backend, args.compressor,
-                              no_title=False, save_pdf=False)
+
+    # Use profiles from Test 1 (first 2 output points for ResNet, i.e. links 0 & 1)
+    # profiles_1 already covers all links; plots below slice [:2] for ResNet.
+    plot_profiles_1 = profiles_1[:2] if args.backend == "resnet" else profiles_1
+    plot_eta_min_mono_1  = eta_min_mono[:2]  if args.backend == "resnet" else eta_min_mono
+    plot_eta_min_conc_1  = eta_min_conc[:2]  if args.backend == "resnet" else eta_min_conc
+    plot_eta_min_final_1 = eta_min_final[:2] if args.backend == "resnet" else eta_min_final
+    plot_d2_1            = d2[:2]            if args.backend == "resnet" else d2
+
+    plot_axis_profiles(eta_grid_1, plot_profiles_1,
+                       plot_eta_min_mono_1, plot_eta_min_conc_1,
+                       plot_eta_min_final_1,
+                       args.out_dir, args.backend, args.compressor)
+
+    plot_second_differences(eta_grid_2, plot_d2_1,
+                            plot_eta_min_conc_1,
+                            args.out_dir, args.backend, args.compressor)
+
+    plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
+                              plot_eta_min_final_1,
+                              args.out_dir, args.backend, args.compressor)
+
+    plot_smoothed_accuracy(eta_grid_1, plot_profiles_1,
+                           plot_eta_min_final_1,
+                           args.out_dir, args.backend, args.compressor,
+                           knn_k=args.knn_k, gauss_sigma=args.gauss_sigma)
 
     print("\nDone.", flush=True)
 

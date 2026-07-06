@@ -65,9 +65,9 @@ _root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _root)
 
 # Global font sizes
-FONT_SIZE_LABEL  = 16
-FONT_SIZE_TICK   = 14
-FONT_SIZE_LEGEND = 12
+FONT_SIZE_LABEL  = 30
+FONT_SIZE_TICK   = 20
+FONT_SIZE_LEGEND = 17
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,56 +226,63 @@ def run_concavity_scan(accuracy_fn, num_links, n_grid, n_repeat,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_directional_profiles(accuracy_fn, num_links, n_grid, n_repeat,
-                              n_directions, ray_end=None, rng_seed=42):
+                              n_directions,
+                              ray_start_max=0.25,
+                              ray_end_min=0.75, ray_end_max=1.0,
+                              rng_seed=42):
     """
-    Sample n_directions rays from eta_start to ray_end.
-    eta_start is sampled uniformly from [0, 0.25] (near-origin starts).
-    One direction always starts from exactly [0,...,0].
+    Sample n_directions rays, each with its own random start and end point.
+
+    Ray d is parameterised as
+        eta(s) = eta_start^(d) + s * (eta_end^(d) - eta_start^(d)),  s in [0,1]
+
+    The first ray always goes from boldsymbol{0} to boldsymbol{1}.
+    Remaining starts are sampled from [0, ray_start_max]^L and ends from
+    [ray_end_min, ray_end_max]^L.
 
     Parameters
     ----------
-    ray_end : (num_links,) array or None
-        Shared endpoint for all rays. Defaults to [1,...,1].
+    ray_start_max : float
+        Upper bound of the uniform distribution for start points (per link).
+    ray_end_min, ray_end_max : float
+        Range of the uniform distribution for end points (per link).
 
     Returns
     -------
     s_grid       : (n_grid,) parameterisation values in [0,1]
     ray_starts   : (n_directions, num_links)
-    ray_end      : (num_links,) the endpoint used
+    ray_ends     : (n_directions, num_links)
     ray_profiles : (n_directions, n_grid)
     """
     rng = np.random.default_rng(rng_seed)
     s_grid = np.linspace(0.0, 1.0, n_grid)
 
-    if ray_end is None:
-        ray_end = np.ones(num_links)
-    else:
-        ray_end = np.asarray(ray_end, dtype=float)
-
-    # First direction: from [0,...,0] to ray_end
+    # First ray: boldsymbol{0} -> boldsymbol{1}
     ray_starts = [np.zeros(num_links)]
-    # Remaining: random starting points near origin, sampled from [0, 0.25]
+    ray_ends   = [np.ones(num_links)]
+    # Remaining rays: random starts and ends
     for _ in range(n_directions - 1):
-        start = rng.uniform(0.0, 0.1, size=num_links)
-        ray_starts.append(start)
+        ray_starts.append(rng.uniform(0.0, ray_start_max, size=num_links))
+        ray_ends.append(rng.uniform(ray_end_min, ray_end_max, size=num_links))
     ray_starts = np.array(ray_starts)
-    ray_starts = np.array([np.array([0,0,0]),np.array([0.05,0.15,0]),np.array([0.05,0,0.15]),np.array([0.1,0.15,0.15])])
+    ray_ends   = np.array(ray_ends)
 
     ray_profiles = np.zeros((n_directions, n_grid))
 
     print(f"\n[Test 3] Directional profiles ({n_directions} rays)", flush=True)
-    print(f"  endpoint = {np.round(ray_end, 3)}", flush=True)
-    for d, start in enumerate(ray_starts):
-        print(f"  Ray {d} start={np.round(start, 2)}:", end="", flush=True)
+    for d in range(n_directions):
+        start, end = ray_starts[d], ray_ends[d]
+        print(f"  Ray {d}  start={np.round(start, 2)}  end={np.round(end, 2)}:",
+              end="", flush=True)
         for j, s in enumerate(s_grid):
-            eta_vec = start + s * (ray_end - start)   # moves from start to ray_end
+            eta_vec = start + s * (end - start)
             eta_vec = np.clip(eta_vec, 0.0, 1.0)
             vals = [accuracy_fn(eta_vec) for _ in range(n_repeat)]
             ray_profiles[d, j] = float(np.mean(vals))
             print(".", end="", flush=True)
         print(flush=True)
 
-    return s_grid, ray_starts, ray_end, ray_profiles
+    return s_grid, ray_starts, ray_ends, ray_profiles
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -345,31 +352,44 @@ def plot_second_differences(eta_grid, d2, eta_min_conc,
     print(f"  Saved: {path}", flush=True)
 
 
-def plot_directional_profiles(s_grid, ray_starts, ray_end, ray_profiles,
+def plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
                                eta_min_final, out_dir, backend, compressor):
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(9, 5))
     cmap = plt.get_cmap("tab10")
+
+    def _vec_str(v):
+        """Format a vector as a compact LaTeX tuple, e.g. (0.12, 0.08)."""
+        inner = ",\,".join(f"{x:.1f}" for x in v)
+        return "(" + inner + ")"
+
     for d in range(len(ray_starts)):
-        label = f"ray {d}: start={np.round(ray_starts[d], 2)}"
-        ax.plot(s_grid, ray_profiles[d], "-o", ms=3,
+        start_str = _vec_str(ray_starts[d])
+        end_str   = _vec_str(ray_ends[d])
+        label = (
+            r"$\boldsymbol{\eta}^{(" + str(d) + r")}_{\mathrm{start}}=" + start_str + r"$"
+            r", $\boldsymbol{\eta}^{(" + str(d) + r")}_{\mathrm{end}}=" + end_str + r"$"
+        )
+        ax.plot(s_grid, ray_profiles[d], "-o", ms=6,
                 color=cmap(d % 10), label=label)
 
-    # Mark where each ray crosses eta_min_final on all links
-    for d in range(len(ray_starts)):
-        start = ray_starts[d]
-        span = ray_end - start
-        with np.errstate(divide="ignore", invalid="ignore"):
-            s_vals = np.where(
-                np.abs(span) > 1e-6,
-                (eta_min_final - start) / span,
-                0.0
-            )
-        s_cross = float(np.max(np.clip(s_vals, 0, 1)))
-        ax.axvline(s_cross, color=cmap(d % 10), ls=":", alpha=0.5)
+    # Vertical marker at s* where the ray enters the informative regime
+    any_vline = np.any(eta_min_final > 0)
+    if any_vline:
+        for d in range(len(ray_starts)):
+            start, end = ray_starts[d], ray_ends[d]
+            span = end - start
+            with np.errstate(divide="ignore", invalid="ignore"):
+                s_vals = np.where(
+                    np.abs(span) > 1e-6,
+                    (eta_min_final - start) / span,
+                    0.0
+                )
+            s_cross = float(np.max(np.clip(s_vals, 0, 1)))
+            ax.axvline(s_cross, color=cmap(d % 10), ls=":", alpha=0.5,
+                       label=r"$s^*$ ray " + str(d) + f"={s_cross:.2f}")
 
-    end_str = "[" + ", ".join(f"{v:.2g}" for v in ray_end) + "]"
-    ax.set_xlabel(f"$s$ (ray parameter: 0=start, 1={end_str})")
-    ax.set_ylabel("$A_\\mathrm{true}$")
+    ax.set_xlabel(r"$s$ (ray parameter)")
+    ax.set_ylabel(r"$A_{\mathrm{true}}(\boldsymbol{\eta}(s))$")
     ax.grid(True, alpha=0.3)
     _style_ax(ax)
     plt.tight_layout()
@@ -489,17 +509,50 @@ def main():
     p.add_argument("--knn_k",              type=int, default=3,
                    help="Half-window for KNN/box smoothing in smoothed_accuracy plot.")
     p.add_argument("--out_dir",            default="outputs/concavity")
-    p.add_argument("--ray_end",            type=float, nargs="+", default=None,
-                   metavar="ETA",
-                   help="Shared endpoint for all rays, one value per link "
-                        "(e.g. --ray_end 0.8 0.9). Defaults to [1,...,1].")
+    p.add_argument("--ray_start_max",      type=float, default=0.25,
+                   help="Upper bound for random ray start points (per link), "
+                        "sampled from [0, ray_start_max]. Default 0.25.")
+    p.add_argument("--ray_end_min",        type=float, default=0.75,
+                   help="Lower bound for random ray end points (per link), "
+                        "sampled from [ray_end_min, ray_end_max]. Default 0.75.")
+    p.add_argument("--ray_end_max",        type=float, default=1.0,
+                   help="Upper bound for random ray end points (per link). "
+                        "Default 1.0. First ray always ends at [1,...,1].")
     p.add_argument("--only_directions",    action="store_true",
                    help="Skip Tests 1 & 2 and only run Test 3 "
                         "(directional profiles). Fast — use when you only "
                         "need the ray plot.")
+    p.add_argument("--replot_directions",  default=None, metavar="JSON_PATH",
+                   help="Path to a saved directional_results.json. Skips ALL "
+                        "computation and backend loading — just reads the JSON "
+                        "and regenerates directional_profiles.pdf. "
+                        "--out_dir is still required.")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    # ── Replot-only mode: no backend, no experiments ──────────────────────────
+    if args.replot_directions:
+        print(f"\n[--replot_directions] Loading {args.replot_directions} ...",
+              flush=True)
+        with open(args.replot_directions) as f:
+            saved = json.load(f)
+        dp          = saved["directional_profiles"]
+        s_grid      = np.array(dp["s_grid"])
+        ray_starts  = np.array(dp["ray_starts"])
+        ray_ends    = np.array(dp["ray_ends"])
+        ray_profiles= np.array(dp["ray_profiles"])
+        num_links   = saved["num_links"]
+        backend     = saved.get("backend",    args.backend)
+        compressor  = saved.get("compressor", args.compressor)
+
+        eta_min_placeholder = np.zeros(num_links)
+        print("\nGenerating plots ...", flush=True)
+        plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
+                                  eta_min_placeholder,
+                                  args.out_dir, backend, compressor)
+        print("\nDone.", flush=True)
+        return
 
     print("="*60, flush=True)
     print("Concavity Analysis — eta_min detection", flush=True)
@@ -518,21 +571,23 @@ def main():
 
     # ── Test 3 only ───────────────────────────────────────────────────────────
     if args.only_directions:
-        s_grid, ray_starts, ray_end, ray_profiles = run_directional_profiles(
+        s_grid, ray_starts, ray_ends, ray_profiles = run_directional_profiles(
             accuracy_fn, num_links,
             n_grid=args.n_grid, n_repeat=args.n_repeat,
             n_directions=args.n_directions,
-            ray_end=args.ray_end,
+            ray_start_max=args.ray_start_max,
+            ray_end_min=args.ray_end_min,
+            ray_end_max=args.ray_end_max,
         )
 
         results = {
             "backend":    args.backend,
             "compressor": args.compressor,
             "num_links":  num_links,
-            "ray_end":    ray_end.tolist(),
             "directional_profiles": {
                 "s_grid":       s_grid.tolist(),
                 "ray_starts":   ray_starts.tolist(),
+                "ray_ends":     ray_ends.tolist(),
                 "ray_profiles": ray_profiles.tolist(),
             },
         }
@@ -542,9 +597,8 @@ def main():
         print(f"\n  Saved results: {json_path}", flush=True)
 
         print("\nGenerating plots ...", flush=True)
-        # No eta_min available — pass zeros as placeholder (no vlines drawn)
         eta_min_placeholder = np.zeros(num_links)
-        plot_directional_profiles(s_grid, ray_starts, ray_end, ray_profiles,
+        plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
                                   eta_min_placeholder,
                                   args.out_dir, args.backend, args.compressor)
         print("\nDone.", flush=True)
@@ -579,11 +633,13 @@ def main():
     print(f"\n  [Test 2] eta_min_conc = {np.round(eta_min_conc, 4)}", flush=True)
 
     # ── Test 3: Directional profiles ─────────────────────────────────────────
-    s_grid, ray_starts, ray_end, ray_profiles = run_directional_profiles(
+    s_grid, ray_starts, ray_ends, ray_profiles = run_directional_profiles(
         accuracy_fn, num_links,
         n_grid=args.n_grid, n_repeat=args.n_repeat,
         n_directions=args.n_directions,
-        ray_end=args.ray_end,
+        ray_start_max=args.ray_start_max,
+        ray_end_min=args.ray_end_min,
+        ray_end_max=args.ray_end_max,
     )
 
     # ── Final recommendation ──────────────────────────────────────────────────
@@ -625,7 +681,7 @@ def main():
         "directional_profiles": {
             "s_grid":       s_grid.tolist(),
             "ray_starts":   ray_starts.tolist(),
-            "ray_end":      ray_end.tolist(),
+            "ray_ends":     ray_ends.tolist(),
             "ray_profiles": ray_profiles.tolist(),
         },
     }
@@ -654,7 +710,7 @@ def main():
                             plot_eta_min_conc_1,
                             args.out_dir, args.backend, args.compressor)
 
-    plot_directional_profiles(s_grid, ray_starts, ray_end, ray_profiles,
+    plot_directional_profiles(s_grid, ray_starts, ray_ends, ray_profiles,
                               plot_eta_min_final_1,
                               args.out_dir, args.backend, args.compressor)
 

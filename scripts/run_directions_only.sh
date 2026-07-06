@@ -16,7 +16,10 @@ HOME_DIR=..
 
 N_GRID=20         # points along each ray
 N_REPEAT=5        # repeats per point (for noise reduction)
-N_DIRECTIONS=4    # number of rays (default 4; starts sampled from [0, 0.25])
+N_DIRECTIONS=4    # number of rays (first always goes 0->1, rest are random)
+RAY_START_MAX=0.25  # starts sampled from [0, RAY_START_MAX] per link
+RAY_END_MIN=0.75    # ends sampled from [RAY_END_MIN, RAY_END_MAX] per link
+RAY_END_MAX=1.0
 
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 
@@ -24,7 +27,7 @@ TIME_RESNET="0:20:00"
 TIME_LLM="1:30:00"
 MEM="32G"
 
-OUT_BASE="${HOME_DIR}/outputs/directions_only"
+OUT_BASE="${HOME_DIR}/outputs/directions_only1"
 
 # =============================================================================
 # END OF PARAMETERS
@@ -66,14 +69,16 @@ export RESNET_FAST_BATCHES=1
 export COMPRESSOR_TYPE=${COMP}
 export COMPRESSOR_BACKEND=gpu
 
-python ${HOME_DIR}/analyze_concavity_directions_only.py \\
+python ${HOME_DIR}/analyze_concavity.py \\
     --backend resnet \\
-    --ray_end 0.5 1 1 \\
     --compressor ${COMP} \\
     --compressor_backend gpu \\
     --n_grid ${N_GRID} \\
     --n_repeat ${N_REPEAT} \\
     --n_directions ${N_DIRECTIONS} \\
+    --ray_start_max ${RAY_START_MAX} \\
+    --ray_end_min ${RAY_END_MIN} \\
+    --ray_end_max ${RAY_END_MAX} \\
     --out_dir ${OUT_DIR} \\
     --only_directions \\
     ${EXTRA_FLAGS}
@@ -121,12 +126,19 @@ export MMLU_BATCH_SIZE=8
 export MMLU_SEED=0
 export MMLU_N_SHOT=5
 
-python ${HOME_DIR}/analyze_concavity.py \\
+python analyze_concavity_directions_only.py \
+    --replot_directions outputs/directions_only1/resnet_topk/directional_results.json \
+    --out_dir outputs/directions_only1/resnet_topk_replot
+
+python ${HOME_DIR}/analyze_concavity_directions_only.py \\
     --backend llm \\
     --compressor ${STRATEGY} \\
     --n_grid ${N_GRID} \\
     --n_repeat ${N_REPEAT} \\
     --n_directions ${N_DIRECTIONS} \\
+    --ray_start_max ${RAY_START_MAX} \\
+    --ray_end_min ${RAY_END_MIN} \\
+    --ray_end_max ${RAY_END_MAX} \\
     --out_dir ${OUT_DIR} \\
     --only_directions \\
     ${EXTRA_FLAGS}
