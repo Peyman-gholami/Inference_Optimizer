@@ -11,6 +11,7 @@ Currently implemented:
 
 from .compression_aware import (
     ChannelSampler,
+    UniformEtaChannelSampler,
     csi_aware_eta_star,
     compression_aware_pretrain,
     standard_pretrain,
@@ -19,6 +20,7 @@ from .compression_aware import (
 
 __all__ = [
     "ChannelSampler",
+    "UniformEtaChannelSampler",
     "csi_aware_eta_star",
     "compression_aware_pretrain",
     "standard_pretrain",

@@ -44,14 +44,19 @@ from ..core.accuracy_fn import CompressedModel
 # Channel distribution  P_c
 # ---------------------------------------------------------------------------
 class ChannelSampler:
-    """Samples per-cut-point link capacities c = (c_1, ..., c_d).
+    """Samples per-link physical capacities c = (c_1, ..., c_d) i.i.d. on [c_min, c_max].
 
-    Default: independent log-uniform on [c_min, c_max] (scalars or per-link arrays),
-    a simple stationary stand-in for the deployment channel distribution.
+    kind="loguniform" (default, aggressive: more mass at low capacity) or "uniform"
+    (milder). The capacities are physical and task-independent -- each task normalizes
+    them itself via c_i/(R_k a_{k,i}) -- so with different R_k / a_{k,i} the induced
+    compression differs across tasks/links (no scale-free reduction as in single-task).
     """
 
-    def __init__(self, d: int, c_min, c_max, seed: Optional[int] = 0):
+    def __init__(self, d: int, c_min, c_max, seed: Optional[int] = 0,
+                 kind: str = "loguniform"):
+        assert kind in ("loguniform", "uniform")
         self.d = d
+        self.kind = kind
         self.c_min = np.broadcast_to(np.asarray(c_min, dtype=float), (d,)).copy()
         self.c_max = np.broadcast_to(np.asarray(c_max, dtype=float), (d,)).copy()
         assert np.all(self.c_min > 0) and np.all(self.c_max >= self.c_min)
@@ -59,8 +64,35 @@ class ChannelSampler:
 
     def __call__(self) -> np.ndarray:
         u = self.rng.uniform(0.0, 1.0, size=self.d)
+        if self.kind == "uniform":
+            return self.c_min + u * (self.c_max - self.c_min)
         log_c = np.log(self.c_min) + u * (np.log(self.c_max) - np.log(self.c_min))
         return np.exp(log_c)
+
+
+class UniformEtaChannelSampler:
+    """Channel engineered so the induced compression eta* is *uniform* on
+    [eta_lo, eta_hi] per cut-point -- a milder, less heavy-end-biased prior than
+    the log-uniform-on-capacity `ChannelSampler`.
+
+    It returns capacities c_i = eta_i * R * a_i, so the unchanged controller
+    csi_aware_eta_star(c) = clip(min(1, c/(R a)), eta_min, 1) recovers eta_i.
+    (Requires eta_lo >= eta_min so the floor never binds.)
+    """
+
+    def __init__(self, d: int, eta_lo: float, eta_hi: float, R: float, a,
+                 seed: Optional[int] = 0):
+        self.d = d
+        self.eta_lo = float(eta_lo)
+        self.eta_hi = float(eta_hi)
+        self.R = float(R)
+        self.a = np.broadcast_to(np.asarray(a, dtype=float), (d,)).copy()
+        assert 0.0 < self.eta_lo <= self.eta_hi <= 1.0
+        self.rng = np.random.default_rng(seed)
+
+    def __call__(self) -> np.ndarray:
+        eta = self.rng.uniform(self.eta_lo, self.eta_hi, size=self.d)
+        return eta * self.R * self.a
 
 
 # ---------------------------------------------------------------------------

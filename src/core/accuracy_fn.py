@@ -46,6 +46,9 @@ class CompressedModel(nn.Module):
     eta         : Tensor (d,) -- initial compression ratios
     cut_modules : list of nn.Module -- layers after which to sparsify.
                   Defaults to all ReLU/Tanh/GELU/Sigmoid layers.
+    sparsify_fn : callable(tensor, eta) -> tensor. Defaults to topk_sparsify
+                  (flattens the whole tensor). Pass a per-sample variant for
+                  batched conv activations.
 
     Usage
     -----
@@ -55,10 +58,11 @@ class CompressedModel(nn.Module):
     """
 
     def __init__(self, base_model: nn.Module, eta: torch.Tensor,
-                 cut_modules=None):
+                 cut_modules=None, sparsify_fn=topk_sparsify):
         super().__init__()
-        self.base_model = base_model
-        self.eta        = eta.clone()
+        self.base_model  = base_model
+        self.eta         = eta.clone()
+        self.sparsify_fn = sparsify_fn
 
         if cut_modules is None:
             cut_modules = [m for m in base_model.modules()
@@ -74,7 +78,7 @@ class CompressedModel(nn.Module):
 
     def _make_hook(self, i: int):
         def hook(module, input, output):
-            return topk_sparsify(output, self.eta[i].item())
+            return self.sparsify_fn(output, self.eta[i].item())
         return hook
 
     def set_eta(self, eta: torch.Tensor):
