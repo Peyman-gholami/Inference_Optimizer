@@ -134,6 +134,48 @@ def discover_ray_files(root: Path) -> List[Path]:
     )
 
 
+# ResNet (directional-profile) backend: a *_concavity_results.json produced by
+# analyze_concavity_directions_only.py stores, per link-count, a set of random
+# rays sampled from a start point to a shared endpoint (default [1,...,1]) as
+# eta_vec(s) = start + s * (ray_end - start). We reconstruct the eta-vector at
+# each grid point so the SAME scalar-floor Jensen test applies unchanged.
+_RESNET_STRAT = {"topk": "topk", "quantization": "quantization",
+                 "llmint8": "llmint8"}
+
+
+def resnet_entries(root: Path) -> List[Tuple[dict, List[dict], str]]:
+    """Convert every resnet concavity_results.json under ``root`` into
+    (meta, rays, source) tuples in the same ray format as the LLM runs."""
+    entries: List[Tuple[dict, List[dict], str]] = []
+    for f in sorted(root.rglob("concavity_results.json")):
+        try:
+            d = json.loads(f.read_text())
+        except Exception as e:  # noqa: BLE001
+            print(f"  skip {f}: {e}")
+            continue
+        if d.get("backend") != "resnet":
+            continue
+        dp = d.get("directional_profiles") or {}
+        s_grid = dp.get("s_grid")
+        starts = dp.get("ray_starts")
+        profiles = dp.get("ray_profiles")
+        if not (s_grid and starts and profiles):
+            continue
+        n_links = int(d.get("num_links", len(starts[0])))
+        ray_end = dp.get("ray_end") or [1.0] * n_links
+        rays = []
+        for start, y in zip(starts, profiles):
+            eta = [[start[l] + s * (ray_end[l] - start[l]) for l in range(n_links)]
+                   for s in s_grid]
+            rays.append({"t": list(s_grid), "y": list(y), "eta": eta,
+                         "start": list(start), "end": list(ray_end)})
+        strat = _RESNET_STRAT.get(d.get("compressor"), d.get("compressor") or "?")
+        meta = {"model": "resnet", "dataset": "imagenet", "metric": "accuracy",
+                "strategy": strat, "n_cuts": n_links}
+        entries.append((meta, rays, str(f)))
+    return entries
+
+
 def _rays_from(data) -> List[dict]:
     """Ray dicts from either a run file (dict with rays/phase2_rays) or a bare
     partial checkpoint (a plain list of ray dicts)."""
@@ -229,6 +271,10 @@ _STRAT_STYLE = {
     "topk_per_token": ("tab:blue", "top-k per token"),
     "llmint8_reserve": ("tab:orange", "llmint8 reserve"),
     "llmint8_adjacent": ("tab:green", "llmint8 adjacent"),
+    # ResNet compressors (directional-profile backend, see resnet_entries).
+    "topk": ("tab:blue", "top-k"),
+    "quantization": ("tab:orange", "quantization"),
+    "llmint8": ("tab:green", "llmint8"),
 }
 
 
@@ -293,6 +339,10 @@ def main() -> None:
     ap.add_argument("--root", default=str(REPO_ROOT / "outputs" / "mc_concavity"),
                     help="Directory tree to scan for *_rays.json.")
     ap.add_argument("--out_dir", default=str(REPO_ROOT / "outputs" / "mc_concavity" / "jensen"))
+    ap.add_argument("--resnet_root",
+                    default=str(REPO_ROOT / "outputs" / "concavity_resnet"),
+                    help="Directory tree scanned for ResNet directional-profile "
+                         "concavity_results.json (folded into the same plots).")
     ap.add_argument("--samples_per_ray", type=int, default=200,
                     help="Jensen triples sampled per ray per floor (capped at C(m,3)).")
     ap.add_argument("--floor_min", type=float, default=0.0)
@@ -348,6 +398,27 @@ def main() -> None:
             added += 1
         if added:
             entry["files"].append(str(f))
+
+    # Fold in ResNet directional-profile runs (different backend, same ray format).
+    resnet_root = Path(args.resnet_root)
+    if resnet_root.exists():
+        r_entries = resnet_entries(resnet_root)
+        print(f"Found {len(r_entries)} resnet concavity files under {resnet_root}")
+        for meta, rays, src in r_entries:
+            key = (meta["model"], meta["dataset"], meta["metric"],
+                   int(meta["n_cuts"]), meta["strategy"])
+            entry = best.setdefault(
+                key, {"meta": meta, "rays": [], "seen": set(), "files": []})
+            added = 0
+            for r in rays:
+                h = _ray_hash(r)
+                if h in entry["seen"]:
+                    continue
+                entry["seen"].add(h)
+                entry["rays"].append(r)
+                added += 1
+            if added:
+                entry["files"].append(src)
 
     # Group by (model, dataset, metric, n_cuts) -> one plot, curve per strategy.
     groups: Dict[Tuple, Dict[str, List[dict]]] = {}

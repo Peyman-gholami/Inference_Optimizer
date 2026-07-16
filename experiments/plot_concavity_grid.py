@@ -23,18 +23,29 @@ import numpy as np
 
 from jensen_concavity import (
     discover_ray_files, _rays_from, _ray_hash, _infer_meta, floor_sweep,
+    resnet_entries,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Fixed categorical color per strategy (dataviz palette slots 1 & 6).
+# One color + label per strategy IDENTITY, shared across all tasks. top-k is
+# always per-token and llmint8 is always the reserve scheme, so the LLM keys
+# (topk_per_token / llmint8_reserve) and the ResNet keys (topk / llmint8) map to
+# the SAME identity, color, and legend entry.
 _STRAT_COLOR = {
-    "topk_per_token": "#2a78d6",   # slot 1, blue
-    "llmint8_reserve": "#e34948",  # slot 6, red
+    "topk_per_token": "#2a78d6",   # blue
+    "topk": "#2a78d6",             # blue (same identity)
+    "llmint8_reserve": "#e34948",  # red
+    "llmint8": "#e34948",          # red (same identity)
+    "quantization": "#e8873a",     # orange (ResNet only)
 }
 _STRAT_LABEL = {
-    "topk_per_token": "top-k per token",
-    "llmint8_reserve": "llmint8 reserve",
+    "topk_per_token": "topk",
+    "topk": "topk",
+    "llmint8_reserve": "llmint8",
+    "llmint8": "llmint8",
+    "quantization": "quantization",
 }
 # Ordinal line style per tol, lightest/densest dashing = smallest offset.
 _TOL_STYLE = {
@@ -50,6 +61,7 @@ _TASK_ORDER = [
     ("google/gemma-7b", "sharegpt", "perplexity", 4),
     ("meta-llama/Llama-3.1-8B", "wikitext", "perplexity", 4),
     ("meta-llama/Llama-3.1-8B", "mmlu", "accuracy", 4),
+    ("resnet", "imagenet", "accuracy", 3),
 ]
 _TASK_TITLE = {
     ("google/gemma-2b", "sharegpt", "perplexity", 4): "gemma-2b · ShareGPT ppl (cuts=4)",
@@ -57,10 +69,11 @@ _TASK_TITLE = {
     ("google/gemma-7b", "sharegpt", "perplexity", 4): "gemma-7b · ShareGPT ppl (cuts=4)",
     ("meta-llama/Llama-3.1-8B", "wikitext", "perplexity", 4): "Llama-3.1-8B · WikiText ppl (cuts=4)",
     ("meta-llama/Llama-3.1-8B", "mmlu", "accuracy", 4): "Llama-3.1-8B · MMLU acc (cuts=4)",
+    ("resnet", "imagenet", "accuracy", 3): "ResNet · ImageNet acc (cuts=3)",
 }
 
 
-def load_ray_pool(root: Path) -> Dict[Tuple, dict]:
+def load_ray_pool(root: Path, resnet_root: Path = None) -> Dict[Tuple, dict]:
     files = discover_ray_files(root)
     print(f"Found {len(files)} ray files (completed + partial) under {root}")
     best: Dict[Tuple, dict] = {}
@@ -85,6 +98,21 @@ def load_ray_pool(root: Path) -> Dict[Tuple, dict]:
                 continue
             entry["seen"].add(h)
             entry["rays"].append(r)
+
+    # Fold in ResNet directional-profile runs (same ray format, different backend).
+    if resnet_root and resnet_root.exists():
+        r_entries = resnet_entries(resnet_root)
+        print(f"Found {len(r_entries)} resnet concavity files under {resnet_root}")
+        for meta, rays, _src in r_entries:
+            key = (meta["model"], meta["dataset"], meta["metric"],
+                   int(meta["n_cuts"]), meta["strategy"])
+            entry = best.setdefault(key, {"meta": meta, "rays": [], "seen": set()})
+            for r in rays:
+                h = _ray_hash(r)
+                if h in entry["seen"]:
+                    continue
+                entry["seen"].add(h)
+                entry["rays"].append(r)
     return best
 
 
@@ -92,6 +120,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(REPO_ROOT / "outputs" / "mc_concavity"))
     ap.add_argument("--out", default=str(REPO_ROOT / "outputs" / "mc_concavity" / "jensen" / "concavity_grid.png"))
+    ap.add_argument("--resnet_root",
+                    default=str(REPO_ROOT / "outputs" / "concavity_resnet"),
+                    help="ResNet directional-profile results, folded into the grid.")
     ap.add_argument("--tols", type=float, nargs="+", default=[0.0, 0.01, 0.02, 0.05, 0.1])
     ap.add_argument("--samples_per_ray", type=int, default=5,
                     help="Jensen triples sampled per ray per floor, per repeat "
@@ -112,7 +143,7 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     floors = np.round(np.arange(args.floor_min, args.floor_max + 1e-9, args.floor_step), 3)
 
-    pool = load_ray_pool(Path(args.root))
+    pool = load_ray_pool(Path(args.root), Path(args.resnet_root))
 
     # curves[(model,dataset,metric,n_cuts)][strategy][tol] = {"floors","mean","std"}
     curves: Dict[Tuple, Dict[str, Dict[float, dict]]] = {}
@@ -157,10 +188,8 @@ def main() -> None:
     for idx, task_key in enumerate(tasks):
         ax = axes[idx // ncols][idx % ncols]
         strat_curves = curves[task_key]
-        for strat in ("topk_per_token", "llmint8_reserve"):
-            if strat not in strat_curves:
-                continue
-            color = _STRAT_COLOR[strat]
+        for strat in sorted(strat_curves):
+            color = _STRAT_COLOR.get(strat, "#52514e")
             for tol in args.tols:
                 sweep = strat_curves[strat][tol]
                 xs = sweep["floors"]
@@ -187,12 +216,21 @@ def main() -> None:
 
     # Two separate legends: strategy (color/identity) and tol (linestyle/ordinal).
     from matplotlib.lines import Line2D
-    strat_handles = [Line2D([0], [0], color=_STRAT_COLOR[s], lw=2.2, label=_STRAT_LABEL[s])
-                      for s in ("topk_per_token", "llmint8_reserve") if s in _STRAT_COLOR]
+    present_strats = sorted({s for t in tasks for s in curves[t]})
+    # Dedup by display label so shared identities (topk_per_token/topk,
+    # llmint8_reserve/llmint8) collapse to a single legend entry.
+    strat_handles, seen_labels = [], set()
+    for s in present_strats:
+        lbl = _STRAT_LABEL.get(s, s)
+        if lbl in seen_labels:
+            continue
+        seen_labels.add(lbl)
+        strat_handles.append(
+            Line2D([0], [0], color=_STRAT_COLOR.get(s, "#52514e"), lw=2.2, label=lbl))
     tol_handles = [Line2D([0], [0], color="#52514e", lw=1.6, linestyle=_TOL_STYLE[t],
                           label=f"tol={t:g}") for t in args.tols]
     leg1 = fig.legend(handles=strat_handles, title="strategy", loc="upper center",
-                      bbox_to_anchor=(0.28, 1.04), ncol=2, fontsize=9)
+                      bbox_to_anchor=(0.28, 1.04), ncol=len(strat_handles), fontsize=9)
     fig.legend(handles=tol_handles, title="tol (concavity offset)", loc="upper center",
               bbox_to_anchor=(0.75, 1.04), ncol=len(tol_handles), fontsize=9)
     fig.add_artist(leg1)
