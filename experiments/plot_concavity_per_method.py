@@ -42,9 +42,13 @@ _STRAT_IDENTITY = {
 }
 _METHOD_ORDER = ["topk", "llmint8", "quantization"]
 
-# Ordinal marker per tol; all curves share ONE color, markers carry the tol.
+# Ordinal encoding per tol: marker shape + a sequential one-hue ramp carrying
+# the same information redundantly (grayscale-safe: lightness is monotone in
+# tol; validated ordinal ramp). Darkest = tol=0 (the strict test), lightening
+# as the tolerance loosens.
 _TOL_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
-_LINE_COLOR = "#2f2e2c"
+_TOL_COLORS = ["#0d366b", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef",
+               "#9ec5f4", "#b7d3f6", "#cde2fb"]
 
 
 def _task_title(task_key: Tuple) -> str:
@@ -126,13 +130,14 @@ def main() -> None:
                 mean, std = sweep["mean"], sweep["std"]
                 mask = ~np.isnan(mean)
                 marker = _TOL_MARKERS[ti % len(_TOL_MARKERS)]
-                ax.plot(floors[mask], mean[mask], color=_LINE_COLOR,
+                color = _TOL_COLORS[ti % len(_TOL_COLORS)]
+                ax.plot(floors[mask], mean[mask], color=color,
                         linewidth=1.3, marker=marker, markersize=5,
                         markerfacecolor="white", markeredgewidth=1.2)
                 ax.fill_between(floors[mask],
                                 np.clip(mean[mask] - std[mask], 0, 1),
                                 np.clip(mean[mask] + std[mask], 0, 1),
-                                color=_LINE_COLOR, alpha=0.08, linewidth=0)
+                                color=color, alpha=0.10, linewidth=0)
             ax.set_ylim(-0.02, 1.02)
             ax.set_xlim(args.floor_min, args.floor_max)
             ax.axhline(1.0, color="k", linestyle=":", alpha=0.3, linewidth=1)
@@ -145,7 +150,7 @@ def main() -> None:
             axes[j // ncols][j % ncols].axis("off")
 
         tol_handles = [
-            Line2D([0], [0], color=_LINE_COLOR, lw=1.3,
+            Line2D([0], [0], color=_TOL_COLORS[ti % len(_TOL_COLORS)], lw=1.3,
                    marker=_TOL_MARKERS[ti % len(_TOL_MARKERS)], markersize=6,
                    markerfacecolor="white", markeredgewidth=1.2,
                    label=f"tol={t:g}")
