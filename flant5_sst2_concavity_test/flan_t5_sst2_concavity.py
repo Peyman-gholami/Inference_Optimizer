@@ -25,7 +25,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -525,6 +525,85 @@ def _build_ray(
     }
 
 
+def adaptive_fill_phase(
+    evaluate: Callable[[np.ndarray], float],
+    rays: List[dict],
+    n: int,
+    *,
+    rng: np.random.Generator,
+    min_box_samples: int,
+    floor_step: float,
+    n_points: int,
+    eps: float,
+    min_seg: float,
+    tol: float,
+    lo_full: np.ndarray,
+    out_dir: Path,
+    stem: str,
+    checkpoint_every: int = 5,
+    floor_max: float = 0.9,
+) -> List[dict]:
+    """Sample extra rays so each floor level has >= min_box_samples usable rays.
+
+    Ported from mc_concavity.adaptive_fill_phase. Scans floor levels high to low;
+    for the highest under-sampled floor c, samples rays from [c, 1]^n (they count
+    toward all lower floors too). `evaluate` returns the single target metric.
+    """
+    floors = np.round(np.arange(0.0, floor_max + 1e-9, floor_step), 3)
+    fill_rays: List[dict] = []
+    all_rays = list(rays)
+
+    for c in reversed(floors):
+        v = np.full(n, float(c))
+        _, usable = concavity_fraction(all_rays, v, tol)
+        if usable >= min_box_samples:
+            continue
+        lo_fill = np.maximum(lo_full, v)
+        batch_idx = 0
+        while True:
+            _, usable = concavity_fraction(all_rays, v, tol)
+            if usable >= min_box_samples:
+                break
+            start, end = sample_random_ray(rng, n, lo=lo_fill, min_seg=min_seg)
+            start = np.clip(start, eps, 1.0)
+            end = np.clip(end, eps, 1.0)
+            ts, etas = ray_eta_points(start, end, n_points)
+            ys: List[float] = []
+            t0 = time.time()
+            for eta_vec in etas:
+                ys.append(float(evaluate(eta_vec)))
+            sd = second_difference_test_on(ys, tol)
+            r = {
+                "id": len(fill_rays),
+                "start": [float(x) for x in start],
+                "end": [float(x) for x in end],
+                "t": [float(x) for x in ts],
+                "eta": [[float(x) for x in e] for e in etas],
+                "y": [float(x) for x in ys],
+                "concave": bool(sd["violations"] == 0),
+                "worst_d2": sd["worst_d2"],
+                "violations": sd["violations"],
+                "fill_floor": float(c),
+            }
+            fill_rays.append(r)
+            all_rays.append(r)
+            batch_idx += 1
+            print(
+                f"  [fill c={c:.2f}] ray {batch_idx}  "
+                f"concave={r['concave']}  worst_d2={sd['worst_d2']:+.4f}  "
+                f"({time.time()-t0:.1f}s)  usable={usable}/{min_box_samples}",
+                flush=True,
+            )
+            if batch_idx % checkpoint_every == 0:
+                cp = out_dir / f"{stem}_fill.partial.json"
+                cp.write_text(json.dumps(fill_rays), encoding="utf-8")
+
+    if fill_rays:
+        cp = out_dir / f"{stem}_fill.partial.json"
+        cp.write_text(json.dumps(fill_rays), encoding="utf-8")
+    return fill_rays
+
+
 def run_mc_phase_multi_metric(
     evaluator: FlanT5SST2ConcavityEvaluator,
     *,
@@ -893,11 +972,156 @@ def cmd_etamin(args) -> None:
         print(f"Wrote {args.out}", flush=True)
 
 
+def cmd_fill(args) -> None:
+    """Standalone adaptive-fill pass on an existing Flan-T5 *_rays.json.
+
+    Mirrors mc_concavity.cmd_fill: loads a rays file, checks per-floor usable-ray
+    coverage up to floor_max, and (only if under-filled) loads the model and
+    samples extra rays inside the high-floor sub-cubes. Resumes from a
+    <stem>_fill.partial.json checkpoint and never clobbers the base rays.
+    """
+    rays_path = Path(args.rays_json)
+    data = json.loads(rays_path.read_text(encoding="utf-8"))
+    n_cuts = int(data.get("n_cuts", NUM_TRANSFER_POINTS))
+    metric = str(data.get("metric", "")).lower()
+    if metric not in METRICS:
+        raise ValueError(
+            f"rays_json metric '{metric}' not in supported {METRICS}"
+        )
+    tol = (
+        float(args.tol)
+        if args.tol is not None
+        else float(data.get("tol", DEFAULT_TOL[metric]))
+    )
+    compressor_name = args.compressor_name or str(
+        data.get("strategy") or data.get("compressor") or "topk"
+    )
+
+    out_dir = Path(args.out_dir) if args.out_dir else rays_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive the stem from the rays filename so the fill checkpoint and the
+    # rewritten output line up exactly with the file we were handed.
+    if rays_path.name.endswith("_rays.json"):
+        stem = rays_path.name[: -len("_rays.json")]
+    else:
+        stem = rays_path.stem
+
+    base_rays = data["rays"] + data.get("phase2_rays", []) + data.get("fill_rays", [])
+    fill_cp = out_dir / f"{stem}_fill.partial.json"
+    prior_fill: List[dict] = []
+    if fill_cp.exists():
+        prior_fill = json.loads(fill_cp.read_text(encoding="utf-8"))
+        base_rays = base_rays + prior_fill
+        print(f"  resuming: {len(prior_fill)} fill rays already on disk", flush=True)
+
+    # De-duplicate before deciding coverage (see mc_concavity.cmd_fill): the
+    # persisted fill_rays and the _fill.partial.json overlap, and counting dupes
+    # inflates the usable-per-floor tally so a thin task looks satisfied. Key on
+    # (start, end, y) — matches jensen_concavity._ray_hash.
+    def _rkey(r: dict) -> str:
+        return json.dumps([
+            [round(float(x), 6) for x in r.get("start", [])],
+            [round(float(x), 6) for x in r.get("end", [])],
+            [round(float(x), 6) for x in r.get("y", [])],
+        ])
+    _seen: set = set()
+    _deduped = []
+    for r in base_rays:
+        k = _rkey(r)
+        if k in _seen:
+            continue
+        _seen.add(k)
+        _deduped.append(r)
+    if len(_deduped) != len(base_rays):
+        print(
+            f"  de-duplicated base rays: {len(base_rays)} -> {len(_deduped)} "
+            f"unique (dropped {len(base_rays) - len(_deduped)})",
+            flush=True,
+        )
+    base_rays = _deduped
+
+    eps = float(args.eps)
+    lo_full = np.full(n_cuts, eps, dtype=np.float64)
+    floors = np.round(np.arange(0.0, args.floor_max + 1e-9, args.adaptive_floor_step), 3)
+    under_filled = []
+    for c in floors:
+        _, usable = concavity_fraction(base_rays, np.full(n_cuts, float(c)), tol)
+        if usable < args.min_box_samples:
+            under_filled.append((float(c), usable))
+    if not under_filled:
+        print(
+            f"  All floors already have >= {args.min_box_samples} usable rays "
+            f"({len(base_rays)} base rays on disk). Skipping model load.",
+            flush=True,
+        )
+        merged = dict(data)
+        merged["fill_rays"] = data.get("fill_rays", []) + prior_fill
+        (out_dir / f"{stem}_rays.json").write_text(_json_dumps(merged), encoding="utf-8")
+        return
+    print(f"  Under-filled floors: {under_filled}", flush=True)
+
+    evaluator = FlanT5SST2ConcavityEvaluator(
+        model_name=args.model_name,
+        dataset_path=args.dataset_path,
+        split=args.split,
+        device=args.device,
+        max_samples=args.max_samples,
+        max_input_length=args.max_input_length,
+        prompt_template=args.prompt_template,
+        positive_token=args.positive_token,
+        negative_token=args.negative_token,
+        compressor_name=compressor_name,
+        llmint8_outlier_precision=args.llmint8_outlier_precision,
+        llmint8_regular_precision=args.llmint8_regular_precision,
+    )
+    print(
+        f"  base rays={len(base_rays)}  metric={metric}  tol={tol}  "
+        f"strategy={compressor_name}  target min_box_samples={args.min_box_samples}",
+        flush=True,
+    )
+
+    def evaluate(eta_vec: np.ndarray) -> float:
+        return float(evaluator.evaluate_all(np.asarray(eta_vec, dtype=np.float64))[metric])
+
+    rng = np.random.default_rng(args.seed)
+    new_fill = adaptive_fill_phase(
+        evaluate,
+        base_rays,
+        n_cuts,
+        rng=rng,
+        min_box_samples=args.min_box_samples,
+        floor_step=args.adaptive_floor_step,
+        n_points=args.n_points,
+        eps=eps,
+        min_seg=args.min_seg,
+        tol=tol,
+        lo_full=lo_full,
+        out_dir=out_dir,
+        stem=stem,
+        floor_max=args.floor_max,
+    )
+
+    all_fill = prior_fill + new_fill
+    for i, r in enumerate(all_fill):
+        r["id"] = i
+    merged = dict(data)
+    merged["fill_rays"] = data.get("fill_rays", []) + all_fill
+    merged["n_cuts"] = n_cuts
+    out_path = out_dir / f"{stem}_rays.json"
+    out_path.write_text(_json_dumps(merged), encoding="utf-8")
+    print(
+        f"  Added {len(new_fill)} new fill rays this run "
+        f"({len(all_fill)} total fill rays). Wrote {out_path}",
+        flush=True,
+    )
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         argv = ["run"]
-    elif argv[0] not in ("run", "etamin", "-h", "--help") and argv[0].startswith("-"):
+    elif argv[0] not in ("run", "etamin", "fill", "-h", "--help") and argv[0].startswith("-"):
         argv = ["run"] + argv
 
     p = argparse.ArgumentParser(
@@ -961,6 +1185,53 @@ def parse_args(argv=None) -> argparse.Namespace:
     e.add_argument("--min_usable", type=int, default=ETAMIN_DEFAULT_MIN_USABLE)
     e.add_argument("--out", default=ETAMIN_DEFAULT_OUT)
     e.set_defaults(func=cmd_etamin)
+
+    f = sub.add_parser(
+        "fill",
+        help="adaptive-fill pass on an existing *_rays.json (per-floor coverage)",
+    )
+    f.add_argument("--rays_json", required=True)
+    f.add_argument(
+        "--out_dir",
+        default=None,
+        help="where to write fill checkpoint + rewritten rays "
+        "(default: the rays_json's own directory)",
+    )
+    f.add_argument(
+        "--tol",
+        type=float,
+        default=None,
+        help="override the concavity tol (default: read from the rays_json)",
+    )
+    f.add_argument("--min_box_samples", type=int, default=100)
+    f.add_argument("--adaptive_floor_step", type=float, default=0.1)
+    f.add_argument("--floor_max", type=float, default=0.7)
+    # Evaluator construction (metric + n_cuts come from the rays_json).
+    f.add_argument("--model_name", default=RUN_DEFAULT_MODEL_NAME)
+    f.add_argument("--dataset_path", default=RUN_DEFAULT_DATASET_PATH)
+    f.add_argument("--split", default=RUN_DEFAULT_SPLIT)
+    f.add_argument("--device", default=RUN_DEFAULT_DEVICE)
+    f.add_argument("--max_samples", type=int, default=RUN_DEFAULT_MAX_SAMPLES)
+    f.add_argument("--max_input_length", type=int, default=RUN_DEFAULT_MAX_INPUT_LENGTH)
+    f.add_argument("--prompt_template", default=RUN_DEFAULT_PROMPT_TEMPLATE)
+    f.add_argument("--positive_token", default=RUN_DEFAULT_POSITIVE_TOKEN)
+    f.add_argument("--negative_token", default=RUN_DEFAULT_NEGATIVE_TOKEN)
+    f.add_argument(
+        "--compressor_name",
+        default=None,
+        help="override the strategy (default: read from the rays_json)",
+    )
+    f.add_argument(
+        "--llmint8_outlier_precision", default=RUN_DEFAULT_LLMINT8_OUTLIER_PRECISION
+    )
+    f.add_argument(
+        "--llmint8_regular_precision", default=RUN_DEFAULT_LLMINT8_REGULAR_PRECISION
+    )
+    f.add_argument("--n_points", type=int, default=RUN_DEFAULT_N_POINTS)
+    f.add_argument("--eps", type=float, default=RUN_DEFAULT_EPS)
+    f.add_argument("--min_seg", type=float, default=RUN_DEFAULT_MIN_SEG)
+    f.add_argument("--seed", type=int, default=RUN_DEFAULT_SEED)
+    f.set_defaults(func=cmd_fill)
 
     return p.parse_args(argv)
 

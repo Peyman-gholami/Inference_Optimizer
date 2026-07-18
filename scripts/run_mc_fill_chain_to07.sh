@@ -23,6 +23,10 @@ FLOOR_MAX=0.7
 TIME="08:00:00"
 MEM="48G"
 MAX_LINKS=3
+# HF cache lives on scratch: the /projects HF_HOME is over its group disk quota,
+# so model downloads (e.g. gemma-2b, not pre-cached) fail with Errno 122 there.
+# Override with HF_CACHE=/some/path if needed.
+HF_CACHE="${HF_CACHE:-/scratch/sirera.m/hf_cache}"
 
 mkdir -p logs
 
@@ -45,6 +49,8 @@ submit_chain() {
             --wrap="
 set -e
 echo \"[wrap] link ${i} Job \$SLURM_JOB_ID on \$(hostname) at \$(date)\" >&2
+export HF_HOME=${HF_CACHE}
+export HF_TOKEN=\$(cat ${HF_CACHE}/token 2>/dev/null)
 eval \"\$(conda shell.bash hook)\"
 conda deactivate
 conda activate easy

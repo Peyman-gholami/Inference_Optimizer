@@ -783,6 +783,31 @@ def cmd_fill(args) -> None:
         base_rays = base_rays + prior_fill
         print(f"  resuming: {len(prior_fill)} fill rays already on disk", flush=True)
 
+    # De-duplicate before deciding coverage: the persisted fill_rays and the
+    # _fill.partial.json overlap (both hold the resumed fill pass), and a ray
+    # can be re-stored identically across merges. Counting duplicates inflates
+    # the usable-per-floor tally and makes a genuinely under-filled task look
+    # satisfied, so the fill would no-op. Key on (start, end, y) — matches
+    # jensen_concavity._ray_hash; exact dupes also share the eta path.
+    def _rkey(r: dict) -> str:
+        return json.dumps([
+            [round(float(x), 6) for x in r.get("start", [])],
+            [round(float(x), 6) for x in r.get("end", [])],
+            [round(float(x), 6) for x in r.get("y", [])],
+        ])
+    _seen: set = set()
+    _deduped = []
+    for r in base_rays:
+        k = _rkey(r)
+        if k in _seen:
+            continue
+        _seen.add(k)
+        _deduped.append(r)
+    if len(_deduped) != len(base_rays):
+        print(f"  de-duplicated base rays: {len(base_rays)} -> {len(_deduped)} "
+              f"unique (dropped {len(base_rays) - len(_deduped)})", flush=True)
+    base_rays = _deduped
+
     eps = args.eps
     lo_full = np.full(args.n_cuts, eps)
     floors = np.round(np.arange(0.0, args.floor_max + 1e-9, args.adaptive_floor_step), 3)

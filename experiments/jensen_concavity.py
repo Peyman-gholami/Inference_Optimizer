@@ -81,6 +81,24 @@ def _infer_meta(path: Path, data: dict) -> dict:
     name = path.name
     parts = path.parts
 
+    # Bare partial checkpoints (killed-run rescue lists) carry no embedded
+    # metadata, so recover it from the run-file naming convention
+    #   <model>__<dataset>__<metric>__<strategy>__cuts<N>...   (model may itself
+    # contain '__' -> '/'). Parse BACKWARD from the cuts<N> token so a
+    # multi-token model slug can't be mistaken for dataset/metric.
+    toks = name.split("__")
+    cut_i = next((i for i, t in enumerate(toks)
+                  if re.match(r"cuts\d+", t)), None)
+    if cut_i is not None and cut_i >= 4:
+        if meta["strategy"] is None:
+            meta["strategy"] = toks[cut_i - 1]
+        if meta["metric"] is None:
+            meta["metric"] = toks[cut_i - 2]
+        if meta["dataset"] is None:
+            meta["dataset"] = toks[cut_i - 3]
+        if meta["model"] is None:
+            meta["model"] = "/".join(toks[:cut_i - 3])
+
     if meta["strategy"] is None:
         for s in _KNOWN_STRATEGIES:
             if s in name or s in parts:
@@ -384,12 +402,21 @@ def main() -> None:
         if meta["n_cuts"] is None:
             print(f"  skip {f.name}: cannot determine n_cuts")
             continue
+        n_cuts = int(meta["n_cuts"])
         key = (meta["model"], meta["dataset"], meta["metric"],
-               int(meta["n_cuts"]), meta["strategy"])
+               n_cuts, meta["strategy"])
+        # Drop rays whose eta dimensionality != n_cuts. Some merged files are
+        # mislabeled (e.g. a cuts7_merged_rays.json that declares n_cuts=7 but
+        # stores 4-dim rays); counting them silently corrupts the scalar-floor
+        # min(eta) test and the whole concavity curve for that (task, cuts).
+        good = [r for r in rays if len(r.get("start", [])) == n_cuts]
+        if len(good) != len(rays):
+            print(f"  {f.name}: dropped {len(rays) - len(good)} rays "
+                  f"with dim != {n_cuts}")
         entry = best.setdefault(
             key, {"meta": meta, "rays": [], "seen": set(), "files": []})
         added = 0
-        for r in rays:
+        for r in good:
             h = _ray_hash(r)
             if h in entry["seen"]:
                 continue
