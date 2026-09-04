@@ -48,8 +48,8 @@ fi
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 export PYTHONPATH="$PWD:$PWD/src/core"
 export INFERENCE_OPTIMIZER_BACKEND=resnet
-# The checkpoint is not tracked on this branch. Point RESNET_CHECKPOINT at
-# wherever your copy lives, e.g.
+# Tracked at models/ on this branch, so the default works after a plain pull.
+# Override if your copy lives elsewhere, e.g.
 #     RESNET_CHECKPOINT=$HOME/assets/resnet56-4bfd9763.th sbatch cluster/run_stein_smoothing.sbatch
 export RESNET_CHECKPOINT="${RESNET_CHECKPOINT:-$PWD/models/resnet56-4bfd9763.th}"
 export RESNET_DATA_ROOT="$PWD/data"
