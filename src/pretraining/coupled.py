@@ -142,6 +142,33 @@ def kkt_adjoint(H, B, active_links, free, n, v):
     return a
 
 
+def kkt_adjoint_reduced(H, B, active_links, free, n, v, rcond=1e-3, damp=0.0):
+    """Adjoint a with J^T v = -M^T a, computed in the active-constraint NULL SPACE using a
+    TRUNCATED pseudo-inverse of the reduced Hessian (options A+B):
+        Z = null(B_af);   a_free = Z (Z^T H_ff Z + damp I)^{+}_{rcond} Z^T v_free.
+    Robust to a small / indefinite H (drops eigen-directions below rcond*max|eig|). With
+    rcond->0, damp=0 and a well-conditioned H it matches `kkt_adjoint`."""
+    free = list(free); nf = len(free)
+    Hff = np.asarray(H, float)[np.ix_(free, free)]
+    v_free = np.asarray(v, float)[free]
+    Baf = np.asarray(B, float)[np.ix_(active_links, free)] if active_links else np.zeros((0, nf))
+    keep = [r for r in range(Baf.shape[0]) if np.any(np.abs(Baf[r]) > 1e-12)]
+    Baf = Baf[keep] if keep else np.zeros((0, nf))
+    if Baf.shape[0] > 0:                      # Z spans the tangent of the active constraints
+        _, s, vt = np.linalg.svd(Baf)
+        rank = int((s > 1e-10).sum())
+        Z = vt[rank:].T
+    else:
+        Z = np.eye(nf)
+    if Z.shape[1] == 0:                       # no free tangent directions -> J = 0
+        return np.zeros(n)
+    Hr = Z.T @ Hff @ Z + damp * np.eye(Z.shape[1])
+    Hr = 0.5 * (Hr + Hr.T)
+    a_free = Z @ (np.linalg.pinv(Hr, rcond=rcond, hermitian=True) @ (Z.T @ v_free))
+    a = np.zeros(n); a[free] = a_free
+    return a
+
+
 def stein_grad(f, x, sigma=0.05, N=2000, seed=0):
     """Antithetic Gaussian-smoothing gradient of scalar f: R^n -> R at x."""
     rng = np.random.default_rng(seed)
