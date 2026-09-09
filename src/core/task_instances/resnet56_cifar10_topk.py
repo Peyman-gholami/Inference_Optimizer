@@ -12,8 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-import resnet20
-
+from .. import resnet20
 from ..accuracy_fn import AccuracyFunction, topk_sparsify
 from ..task import InferenceTask
 from ..toy_A import grad_oracle

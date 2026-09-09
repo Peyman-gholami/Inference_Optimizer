@@ -39,7 +39,7 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-# Repo root on sys.path so `import resnet20` works for the ResNet task instance.
+# Repo root on sys.path so `from src...` works when running this script directly.
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)

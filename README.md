@@ -17,7 +17,7 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Run scripts from the repository root so `src` and `resnet20.py` import correctly.
+Run scripts from the repository root so `from src...` imports resolve.
 
 ## Public entry points
 
@@ -78,9 +78,9 @@ Registered task names are listed in `--task` / `--tasks` help text (via
 
 ```
 src/core/                 # InferenceTask, callables, compressors, Stein oracles
+src/core/resnet20.py      # CIFAR ResNet architectures (incl. ResNet-56)
 src/core/task_instances/  # Plug-in task families
 src/optimizers/           # CSI / no-CSI optimizers, estimators, baselines
-resnet20.py               # ResNet architecture used by the CIFAR-10 task
 assets/                   # ResNet checkpoint, traces, fitting models
 ```
 
