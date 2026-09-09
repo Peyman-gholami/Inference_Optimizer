@@ -1,15 +1,11 @@
 numpy
 scipy
 scikit-learn
-# for running the test
-pytest
-# Plotting for baseline comparisons
 matplotlib
-# For main.py demo (InferenceTaskCallables with MNIST)
 torch
 torchvision
 
-# LLM backend (HF + datasets)
+# Optional LLM backend (see README_LLM.md)
 transformers>=4.41.2
 datasets>=2.19.2
 accelerate>=0.30.1

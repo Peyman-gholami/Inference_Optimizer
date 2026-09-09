@@ -47,12 +47,49 @@ def _parse_r_from_dirname(name: str) -> Optional[float]:
 
 
 def _legend_label(name: str) -> str:
-    # Keep legend concise: selected compression baseline labels should not include CSI-AWARE.
-    lower = name.lower()
-    if "compression" in lower and ("max" in lower or "min" in lower or "no" in lower):
-        label = re.sub(r"\bcsi[- ]?aware\b", "", name, flags=re.IGNORECASE)
-        label = re.sub(r"\s{2,}", " ", label).strip(" -_")
-        return label
+    lower = name.lower().strip()
+
+    # Our methods (single- and multi-task variants).
+    if "csi-aware (optimal)" in lower or "csi-aware optimal" in lower:
+        return "OURS-CSI"
+    if "no-csi" in lower and "alg" in lower and "lcb" in lower:
+        return "OURS-NOCSI"
+
+    prefix: Optional[str] = None
+    desc = lower
+    if ":" in name:
+        raw_prefix, raw_desc = name.split(":", 1)
+        prefix = raw_prefix.strip()
+        desc = raw_desc.lower().strip()
+
+    short: Optional[str] = None
+    if "max compression" in desc or "min compression" in desc:
+        short = "MAX"
+    elif "no compression" in desc:
+        short = "NONE"
+    elif "uniform compression" in desc:
+        short = "UNI"
+    elif "myopic" in desc:
+        short = "MYO"
+    elif "conservative" in desc:
+        short = "CONS"
+    elif "moving average" in desc:
+        short = "MA"
+    elif "equal-share" in desc or "equal share" in desc:
+        short = "EQ"
+    elif "strict priority" in desc:
+        short = "PRIO"
+    elif "lambda-proportional" in desc or "lambda proportional" in desc:
+        short = "D-L-PROP"
+    elif "decoupled equal-split" in desc or "decoupled equal split" in desc:
+        short = "D-EQUAL"
+    elif "proportional" in desc:
+        short = "PROP"
+    elif "lcb" in desc:
+        short = "LCB"
+
+    if short is not None:
+        return f"{prefix}: {short}" if prefix else short
     return name
 
 
@@ -197,76 +234,109 @@ def plot_r_sweep_tradeoff_excess_delay(
     norm = Normalize(vmin=R_min, vmax=R_max)
     cmap_obj = plt.get_cmap(cmap)
 
-    fig, ax = plt.subplots(figsize=(9.5, 6.5))
-    markers = _markers_for_algos(ref_order)
-    legend_handles: List[Line2D] = []
+    # Larger defaults so axis labels, ticks, legend, and colorbar stay readable in saved PNGs.
+    _plot_rc = {
+        "font.size": 13,
+        "axes.labelsize": 15,
+        "axes.titlesize": 15,
+        "xtick.labelsize": 13,
+        "ytick.labelsize": 13,
+        "legend.fontsize": 12,
+        "legend.title_fontsize": 13,
+    }
+    with plt.rc_context(_plot_rc):
+        fig, ax = plt.subplots(figsize=(10, 7))
+        markers = _markers_for_algos(ref_order)
+        legend_handles: List[Line2D] = []
 
-    for name in ref_order:
-        pts = sorted(series[name], key=lambda p: p[0])
-        R_vals = np.asarray([p[0] for p in pts], dtype=float)
-        accs = np.asarray([p[1] for p in pts], dtype=float)
-        excs = np.asarray([p[2] for p in pts], dtype=float)
-        path = np.column_stack([excs, accs])
+        for name in ref_order:
+            pts = sorted(series[name], key=lambda p: p[0])
+            R_vals = np.asarray([p[0] for p in pts], dtype=float)
+            accs = np.asarray([p[1] for p in pts], dtype=float)
+            excs = np.asarray([p[2] for p in pts], dtype=float)
+            path = np.column_stack([excs, accs])
 
-        if path.shape[0] >= 2:
-            segments = np.stack([path[:-1], path[1:]], axis=1)
-            seg_r = 0.5 * (R_vals[:-1] + R_vals[1:])
-            colors = cmap_obj(norm(seg_r))
-            line_style = "--" if "No-CSI" in name else "-"
-            lc = LineCollection(
-                segments,
-                colors=colors,
-                linewidths=0.65,
-                linestyle=line_style,
-                zorder=1,
-            )
-            # White halo improves contrast against nearby lines/grid.
-            lc.set_path_effects([pe.Stroke(linewidth=2.5, foreground="white"), pe.Normal()])
-            ax.add_collection(lc)
+            if path.shape[0] >= 2:
+                segments = np.stack([path[:-1], path[1:]], axis=1)
+                seg_r = 0.5 * (R_vals[:-1] + R_vals[1:])
+                colors = cmap_obj(norm(seg_r))
+                # Style conventions:
+                # - dotted: no compression + max/min compression baselines
+                # - dashed: No-CSI variants
+                # - solid: everything else
+                lower_name = name.lower()
+                # Keep No-CSI variants visually distinct from compression baselines.
+                if "no-csi" in lower_name or "no csi" in lower_name:
+                    line_style = "--"
+                elif "compression" in lower_name and (
+                    "no compression" in lower_name or "max" in lower_name or "min" in lower_name
+                ):
+                    line_style = ":"
+                else:
+                    line_style = "-"
+                lc = LineCollection(
+                    segments,
+                    colors=colors,
+                    linewidths=0.65,
+                    linestyle=line_style,
+                    zorder=1,
+                )
+                # White halo improves contrast against nearby lines/grid.
+                lc.set_path_effects([pe.Stroke(linewidth=2.5, foreground="white"), pe.Normal()])
+                ax.add_collection(lc)
 
-        m = markers[name]
-        ax.scatter(
-            excs,
-            accs,
-            c=R_vals,
-            cmap=cmap_obj,
-            norm=norm,
-            marker=m,
-            s=55,
-            edgecolors="black",
-            linewidths=.4,
-            zorder=3,
-        )
-
-        legend_linestyle = "--" if "No-CSI" in name else "-"
-        legend_handles.append(
-            Line2D(
-                [0],
-                [0],
-                color="0.35",
+            m = markers[name]
+            ax.scatter(
+                excs,
+                accs,
+                c=R_vals,
+                cmap=cmap_obj,
+                norm=norm,
                 marker=m,
-                linestyle=legend_linestyle,
-                linewidth=1.4,
-                markersize=7,
-                label=_legend_label(name),
+                s=55,
+                edgecolors="black",
+                linewidths=.4,
+                zorder=3,
             )
-        )
 
-    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(r"$R_k$")
+            lower_name = name.lower()
+            if "no-csi" in lower_name or "no csi" in lower_name:
+                legend_linestyle = "--"
+            elif "compression" in lower_name and (
+                "no compression" in lower_name or "max" in lower_name or "min" in lower_name
+            ):
+                legend_linestyle = ":"
+            else:
+                legend_linestyle = "-"
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color="0.35",
+                    marker=m,
+                    linestyle=legend_linestyle,
+                    linewidth=1.4,
+                    markersize=9,
+                    label=_legend_label(name),
+                )
+            )
 
-    ax.axvline(0.0, color="black", linewidth=1.0, alpha=0.55)
-    ax.set_xscale("symlog", linthresh=x_symlog_linthresh)
-    ax.set_xlabel(r"Cumulative avg $D_k - 1/R_k$ at $t = T-1$")
-    ax.set_ylabel("Cumulative average accuracy at t = T-1")
-    ax.set_title("Accuracy vs excess delay across R sweep (one trajectory per algorithm)")
-    ax.grid(True, alpha=0.3, which="both")
-    ax.legend(handles=legend_handles, ncol=1, fontsize=8)
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
-    fig.savefig(out_path, dpi=180)
-    plt.close(fig)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+        # Horizontal label under the colorbar (default set_label is side-mounted, rotated).
+        cbar.ax.set_xlabel(r"$R_k$", fontsize=15, labelpad=10)
+        cbar.ax.tick_params(labelsize=13)
+
+        ax.axvline(0.0, color="black", linewidth=1.0, alpha=0.55)
+        ax.set_xscale("symlog", linthresh=x_symlog_linthresh)
+        ax.set_xlabel("Excess Delay")
+        ax.set_ylabel("Aggregate Utility")
+        ax.grid(True, alpha=0.3, which="both")
+        ax.legend(handles=legend_handles, ncol=1)
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+        fig.savefig(out_path, dpi=180)
+        plt.close(fig)
     return out_path
 
 

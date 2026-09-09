@@ -37,9 +37,10 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
-_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _root)
-sys.path.insert(0, os.path.join(_root, "src", "core"))
+# Repo root on sys.path so `import resnet20` works for the ResNet task instance.
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import numpy as np
 
@@ -50,7 +51,7 @@ matplotlib.use("Agg")  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from src.core.task import InferenceTask
-from src.core.task_handler import get_task
+from src.core.task_handler import get_task, registered_task_names
 from src.optimizers.base import BaseOptimizer
 from src.optimizers.csi_aware import CSIAwareMultiTaskOptimizer
 from src.optimizers.no_csi import NoCSIMultiTaskOptimizer
@@ -66,12 +67,6 @@ from src.optimizers.baseline import (
     HistoricalAverageCertaintyEquivalenceMultiTaskBaseline,
     LCBCertaintyEquivalenceMultiTaskBaseline,
 )
-
-# Reuse the exact model + callables + task builder from main.py.
-_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _root)
-sys.path.insert(0, os.path.join(_root, "src", "core"))
-    
 
 
 def _parse_task_names(s: str) -> List[str]:
@@ -182,20 +177,6 @@ def run_compare(
                 R_k=float(R_k_per_task[k]),
             )
         )
-
-    # Make tasks heterogeneous: different per-link data sizes a_{i,k}.
-    # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
-    # if len(tasks) >= 2 and not llm_use_measured_tau_a():
-    # # Skip when using measured LLM payloads so per-task `a` stays table-aligned.
-    # if len(tasks) >= 2 and not llm_use_measured_tau_a():
-    #     # Task 1: smaller payloads (faster comm)
-    #     tasks[0].a = {0: 5.0, 1: 40.0}
-    #     # Task 2: larger payloads (slower comm)
-    #     tasks[1].a = {0: 20.0, 1: 25.0}
-    # Scripted for the default 3-node / 2-link demo only.
-    # if len(tasks) >= 2 and M == 3:
-    #     tasks[0].a = {0: 5.0, 1: 40.0}
-    #     tasks[1].a = {0: 20.0, 1: 25.0}
 
     # Algorithms
     csi_opt = CSIAwareMultiTaskOptimizer(M=M, tasks=tasks)
@@ -544,8 +525,9 @@ def main() -> None:
         type=str,
         default="toy_mlp_mnist",
         help=(
-            "Comma-separated registered task names (see src.core.task_handler). "
-            "One name is reused for all K tasks; otherwise supply exactly K names."
+            "Comma-separated registered task names. "
+            "One name is reused for all K tasks; otherwise supply exactly K names. "
+            f"Available: {', '.join(registered_task_names())}."
         ),
     )
     p.add_argument(

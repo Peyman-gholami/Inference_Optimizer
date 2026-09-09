@@ -1,9 +1,21 @@
 """
 Resolve task family by name and build :class:`~src.core.task.InferenceTask` instances.
 
-Setup (model training, :class:`~src.core.task_callables.InferenceTaskCallables`, etc.) lives
-in ``src/core/task_instances/*.py``. This module caches that result per task name so scripts
-only pass the task name to :func:`get_task`.
+Setup (model training, callables, etc.) lives in ``src/core/task_instances/*.py``.
+This module caches that result per task name so scripts only pass the name to
+:func:`get_task`.
+
+Task instance contract
+----------------------
+Each registered module must implement:
+
+* ``setup_model_and_callables(**kwargs) -> (api, extra)`` where ``api`` exposes
+  ``accuracy_callable``, ``gradient_callable``, and ``accuracy_callable_true``
+  (each maps ``np.ndarray`` → float / ndarray).
+* ``make_task(task_id, api, w_k=..., R_k=..., **kwargs) -> InferenceTask``
+
+Optional kwargs such as ``compressor_name`` are forwarded when the registry name
+implies a codec (e.g. ``resnet56_cifar10_quantization`` → ``quantization``).
 """
 
 from __future__ import annotations
@@ -11,22 +23,28 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 from .task import InferenceTask
-from .task_callables import InferenceTaskCallables
 from .task_instances import resnet56_cifar10_topk
 from .task_instances import toy_mlp_mnist
 
-_REGISTRY: Dict[str, Any] = {
-    "resnet56_cifar10_topk": resnet56_cifar10_topk,
-    "resnet56_cifar10_quantization": resnet56_cifar10_topk,
-    "resnet56_cifar10_llmint8": resnet56_cifar10_topk,
-    "toy_mlp_mnist": toy_mlp_mnist,
+# name -> (module, optional compressor_name forwarded to setup/make_task)
+_REGISTRY: Dict[str, Tuple[Any, Optional[str]]] = {
+    "resnet56_cifar10_topk": (resnet56_cifar10_topk, "topk"),
+    "resnet56_cifar10_quantization": (resnet56_cifar10_topk, "quantization"),
+    "resnet56_cifar10_llmint8": (resnet56_cifar10_topk, "llmint8"),
+    "toy_mlp_mnist": (toy_mlp_mnist, None),
 }
 
-_API_CACHE: Dict[str, Tuple[InferenceTaskCallables, Any]] = {}
+_API_CACHE: Dict[str, Tuple[Any, Any]] = {}
 
 
-def register_task(name: str, module: Any) -> None:
-    _REGISTRY[name] = module
+def register_task(
+    name: str,
+    module: Any,
+    *,
+    compressor_name: Optional[str] = None,
+) -> None:
+    """Register a task-instance module under ``name``."""
+    _REGISTRY[name] = (module, compressor_name)
 
 
 def registered_task_names() -> list[str]:
@@ -41,7 +59,7 @@ def clear_task_api_cache(name: Optional[str] = None) -> None:
         _API_CACHE.pop(name, None)
 
 
-def _module(name: str) -> Any:
+def _entry(name: str) -> Tuple[Any, Optional[str]]:
     if name not in _REGISTRY:
         raise KeyError(
             f"Unknown task {name!r}. Registered: {', '.join(registered_task_names())}"
@@ -49,14 +67,23 @@ def _module(name: str) -> Any:
     return _REGISTRY[name]
 
 
-def _ensure_setup(name: str) -> Tuple[InferenceTaskCallables, Any]:
+def _module(name: str) -> Any:
+    return _entry(name)[0]
+
+
+def _setup_kwargs(name: str) -> Dict[str, Any]:
+    compressor_name = _entry(name)[1]
+    return {"compressor_name": compressor_name} if compressor_name is not None else {}
+
+
+def _ensure_setup(name: str) -> Tuple[Any, Any]:
     if name not in _API_CACHE:
         mod = _module(name)
-        _API_CACHE[name] = mod.setup_model_and_callables()
+        _API_CACHE[name] = mod.setup_model_and_callables(**_setup_kwargs(name))
     return _API_CACHE[name]
 
 
-def setup_task_api(name: str) -> Tuple[InferenceTaskCallables, Any]:
+def setup_task_api(name: str) -> Tuple[Any, Any]:
     """Return cached ``(api, extra)`` from the task instance module, creating it if needed."""
     return _ensure_setup(name)
 
@@ -75,4 +102,5 @@ def get_task(
     the same callables so multiple tasks can share one trained model without passing ``api``.
     """
     api, _ = _ensure_setup(name)
-    return _module(name).make_task(task_id=task_id, api=api, w_k=w_k, R_k=R_k)
+    kwargs = _setup_kwargs(name)
+    return _module(name).make_task(task_id=task_id, api=api, w_k=w_k, R_k=R_k, **kwargs)

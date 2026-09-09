@@ -4,7 +4,6 @@ import json
 import os
 import pickle
 from pathlib import Path
-import sys
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -21,38 +20,52 @@ from ..toy_A import grad_oracle
 
 
 _ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_CHECKPOINT_PATH = _ROOT / "assets" / "resnet56-4bfd9763.th"
-_DEFAULT_TRACE_PATH = _ROOT / "assets" / "resnet56_cifar10_15Mbps_scenario_trace_topk.json"
 _DEFAULT_DATA_ROOT = _ROOT / "data"
 _DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# Default compute/communication profile (4-node / 3-link chain) when no trace path is set.
+_DEFAULT_TAU = {
+    0: 0.010589158860966563,
+    1: 0.00960599142126739,
+    2: 0.011260934406891465,
+    3: 0.011232641758397222,
+}
+_DEFAULT_A = {
+    0: 6553600.0,
+    1: 3276800.0,
+    2: 1638400.0,
+}
 
-_DEFAULT_TRUE_SAMPLES = 100
+_DEFAULT_TRUE_SAMPLES = 200
 _DEFAULT_FAST_SAMPLES = 100
 _DEFAULT_SIGMA = 0.05
 _DEFAULT_N = 5
-_DEFAULT_ETA_MIN = 0.125
+_DEFAULT_ETA_MIN = 0.02
 _DEFAULT_ACCURACY_ESTIMATOR_MODE = "stein_estimator"
 _DEFAULT_COMPRESSOR_NAME = "topk"
-_DEFAULT_LLMINT8_MAPPING_PATH = _ROOT / "assets" / "raw_accuracy_resnet56_llmint8_eta_mapping.json"
-_FALLBACK_LLMINT8_MAPPING_PATH = _ROOT.parent / "acc_estimatior_fitting_models" / "raw_accuracy_resnet56_llmint8_eta_mapping.json"
 _DEFAULT_LLMINT8_POLICY = "fp16_int4"
 _DEFAULT_LLMINT8_OUTLIER_PRECISION = "fp16"
 _DEFAULT_LLMINT8_REGULAR_PRECISION = "int4"
 
-_WORKSPACE_ROOT = _ROOT.parent
-if str(_WORKSPACE_ROOT) not in sys.path:
-    sys.path.insert(0, str(_WORKSPACE_ROOT))
+from ..llmint8_eta_mapping import resolve_codec_execution_plan
+from ..llmint8_eta_mapping import validate_llmint8_mapping_entries
 
-from llmint8_eta_mapping import validate_llmint8_mapping_entries  # type: ignore
-from llmint8_eta_mapping import resolve_codec_execution_plan  # type: ignore
-from compressors import get_compressor  # type: ignore
+try:
+    from ..compressors import get_compressor  # type: ignore
+except ModuleNotFoundError:
+    get_compressor = None  # type: ignore[assignment]
 
 
 
-def _env_path(name: str, default_path: Path) -> Path:
+def _env_path(name: str, default_path: Path | None = None) -> Path:
     value = os.environ.get(name)
-    return Path(value).expanduser().resolve() if value else default_path
+    if value:
+        return Path(value).expanduser().resolve()
+    if default_path is not None:
+        return default_path
+    raise FileNotFoundError(
+        "Environment variable {} must be set to a readable path.".format(name)
+    )
 
 
 def _resolve_accuracy_estimator_mode() -> str:
@@ -72,8 +85,8 @@ def _resolve_accuracy_estimator_mode() -> str:
     return aliases[mode]
 
 
-def _resolve_compressor_name() -> str:
-    value = os.environ.get("RESNET56_COMPRESSOR_NAME", _DEFAULT_COMPRESSOR_NAME)
+def _resolve_compressor_name(override_name: str | None = None) -> str:
+    value = override_name if override_name is not None else os.environ.get("RESNET56_COMPRESSOR_NAME", _DEFAULT_COMPRESSOR_NAME)
     name = str(value).strip().lower()
     aliases = {
         "topk": "topk",
@@ -90,36 +103,23 @@ def _resolve_compressor_name() -> str:
     return aliases[name]
 
 
-def _resolve_fitting_model_path() -> Path:
-    explicit_path = os.environ.get("RESNET56_FITTING_MODEL_PATH")
-    if explicit_path:
-        path = Path(explicit_path).expanduser()
-        return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
-    compressor_name = _resolve_compressor_name()
-    if compressor_name == "quantization":
-        return (_ROOT / "assets" / "jetson_resnet_3tp_quantization_poly3_flex.pkl").resolve()
-    if compressor_name == "llmint8":
-        policy = str(os.environ.get("RESNET56_LLMINT8_POLICY", _DEFAULT_LLMINT8_POLICY)).strip().lower()
-        return (_ROOT / "assets" / "jetson_resnet_3tp_llmint8_{}_poly3_flex.pkl".format(policy)).resolve()
-    return (_ROOT / "assets" / "jetson_resnet_3tp_poly3_flex.pkl").resolve()
+def _resolve_fitting_model_path(compressor_name: str) -> Path:
+    del compressor_name  # codec-specific defaults are not bundled; path must be set explicitly
+    return _env_path("RESNET56_FITTING_MODEL_PATH")
 
 
-def _resolve_llmint8_mapping_path() -> Path:
+def _resolve_llmint8_mapping_path() -> Path | None:
     explicit_path = os.environ.get("RESNET56_LLMINT8_MAPPING_PATH")
-    if explicit_path:
-        path = Path(explicit_path).expanduser()
-        return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
-    if _DEFAULT_LLMINT8_MAPPING_PATH.exists():
-        return _DEFAULT_LLMINT8_MAPPING_PATH.resolve()
-    return _FALLBACK_LLMINT8_MAPPING_PATH.resolve()
+    if not explicit_path:
+        return None
+    path = Path(explicit_path).expanduser()
+    return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
 
 
 def _resolve_llmint8_mapping_entries(num_links: int) -> list[Dict[str, Any]]:
     path = _resolve_llmint8_mapping_path()
-    if not path.exists():
-        raise FileNotFoundError(
-            "Requested llmint8 mapping was not found: {!s}. Set RESNET56_LLMINT8_MAPPING_PATH.".format(path)
-        )
+    if path is None or not path.exists():
+        return []
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     entries = payload.get("llmint8_eta_to_codec_mapping", {}).get("entries", payload.get("entries", []))
@@ -228,7 +228,16 @@ class Phase1CompressedModel(nn.Module):
         self.llmint8_mapping_entries = list(llmint8_mapping_entries or [])
         self.llmint8_outlier_precision = str(llmint8_outlier_precision)
         self.llmint8_regular_precision = str(llmint8_regular_precision)
-        self._compressor = None if self.compressor_name in ("identity", None) else get_compressor(self.compressor_name)
+        if self.compressor_name not in ("topk", "identity", "none") and get_compressor is None:
+            raise ModuleNotFoundError(
+                "compressors module is required for compressor '{}' but was not found. "
+                "Use topk mode or install/provide the compressors module.".format(self.compressor_name)
+            )
+        self._compressor = (
+            None
+            if self.compressor_name in ("topk", "identity", "none")
+            else get_compressor(self.compressor_name)
+        )
         self._compression_params_list = [float(item) for item in eta.detach().cpu().tolist()]
 
         if cut_modules is None:
@@ -282,6 +291,7 @@ class Phase1InferenceTaskCallables:
         sigma: float = 0.05,
         N: int = 50,
         n_samples: int = 512,
+        n_samples_true: int | None = None,
         flat_theta: torch.Tensor = None,
         eta_min=None,
         device=None,
@@ -297,7 +307,7 @@ class Phase1InferenceTaskCallables:
         if int(self.eta_min.numel()) != int(cm.d):
             raise ValueError("Expected {} eta_min values, got {}".format(cm.d, self.eta_min.numel()))
         self.A = AccuracyFunction(cm, test_loader, n_samples=n_samples, device=self.device)
-        self.A_true = AccuracyFunction(cm, test_loader, n_samples=None, device=self.device)
+        self.A_true = AccuracyFunction(cm, test_loader, n_samples=n_samples_true, device=self.device)
 
     def _clamp_eta_torch(self, eta: torch.Tensor) -> torch.Tensor:
         eta_t = eta.to(dtype=torch.float32).reshape(-1)
@@ -327,7 +337,10 @@ class Phase1InferenceTaskCallables:
         return self._acc_true_torch(eta).item()
 
 
-def _load_profile(trace_path: Path) -> Tuple[Dict[int, float], Dict[int, float]]:
+def _load_profile(trace_path: Path | None) -> Tuple[Dict[int, float], Dict[int, float]]:
+    if trace_path is None:
+        return dict(_DEFAULT_TAU), dict(_DEFAULT_A)
+
     payload = json.loads(trace_path.read_text(encoding="utf-8"))
     trace = payload["trace"]
     activation_bytes = np.asarray(trace["activation_bytes"], dtype=float)
@@ -365,16 +378,16 @@ def _build_test_loader(data_root: Path, batch_size: int = 100, download: bool = 
     return DataLoader(dataset, batch_size=int(batch_size), shuffle=False)
 
 
-def setup_model_and_callables():
+def setup_model_and_callables(*, compressor_name: str | None = None):
     device = torch.device(os.environ.get("RESNET56_PHASE1_DEVICE", _DEFAULT_DEVICE))
-    checkpoint_path = _env_path("RESNET56_PHASE1_CHECKPOINT", _DEFAULT_CHECKPOINT_PATH)
+    checkpoint_path = _env_path("RESNET56_PHASE1_CHECKPOINT")
     data_root = _env_path("RESNET56_PHASE1_DATA_ROOT", _DEFAULT_DATA_ROOT)
     fast_samples = int(os.environ.get("RESNET56_PHASE1_FAST_SAMPLES", str(_DEFAULT_FAST_SAMPLES)))
     true_samples = int(os.environ.get("RESNET56_PHASE1_TRUE_SAMPLES", str(_DEFAULT_TRUE_SAMPLES)))
     sigma = float(os.environ.get("RESNET56_PHASE1_SIGMA", str(_DEFAULT_SIGMA)))
     stein_n = int(os.environ.get("RESNET56_PHASE1_STEIN_N", str(_DEFAULT_N)))
     download = os.environ.get("RESNET56_PHASE1_DOWNLOAD", "0").strip() in {"1", "true", "True"}
-    compressor_name = _resolve_compressor_name()
+    compressor_name = _resolve_compressor_name(compressor_name)
 
     model = _load_model(checkpoint_path, device)
     test_loader = _build_test_loader(data_root=data_root, batch_size=100, download=download)
@@ -428,16 +441,18 @@ def make_task(
     api: InferenceTaskCallables,
     w_k: float = 1.0,
     R_k: float = 10.0,
+    compressor_name: str | None = None,
 ) -> InferenceTask:
-    trace_path = _env_path("RESNET56_PHASE1_TRACE_PATH", _DEFAULT_TRACE_PATH)
+    trace_env = os.environ.get("RESNET56_PHASE1_TRACE_PATH")
+    trace_path = Path(trace_env).expanduser().resolve() if trace_env else None
     tau, a = _load_profile(trace_path)
     eta_floor = float(os.environ.get("RESNET56_PHASE1_ETA_MIN", str(_DEFAULT_ETA_MIN)))
     accuracy_mode = _resolve_accuracy_estimator_mode()
-    compressor_name = _resolve_compressor_name()
+    compressor_name = _resolve_compressor_name(compressor_name)
 
     fitting_model_path: Path | None = None
     if accuracy_mode == "fitting_model":
-        fitting_model_path = _resolve_fitting_model_path()
+        fitting_model_path = _resolve_fitting_model_path(compressor_name)
         if not fitting_model_path.exists():
             raise FileNotFoundError(
                 "Requested fitting model was not found: {!s}. "

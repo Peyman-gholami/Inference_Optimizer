@@ -39,9 +39,10 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _root)
-sys.path.insert(0, os.path.join(_root, "src", "core"))
+# Repo root on sys.path so `import resnet20` works for the ResNet task instance.
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import numpy as np
 
@@ -52,7 +53,7 @@ matplotlib.use("Agg")  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from src.core.task import InferenceTask
-from src.core.task_handler import get_task
+from src.core.task_handler import get_task, registered_task_names
 from src.optimizers.base import BaseOptimizer
 from src.optimizers.csi_aware import CSIAwareSingleTaskOptimizer
 from src.optimizers.no_csi import NoCSISingleTaskOptimizer
@@ -253,6 +254,7 @@ def run_compare(
                 continue
 
             acc_hist[name][t] = _compute_accuracy(task, allocations)
+            print(f"algo: {name}, accuracy: {acc_hist[name][t]}")
             delay, excess_delay = _compute_delay_and_excess(opt, task, t, allocations, c_t)
             print(f"algo: {name}, delay: {delay}, excess_delay: {excess_delay}")
             excess_delay_hist[name][t] = excess_delay
@@ -502,7 +504,10 @@ def main() -> None:
         "--task",
         type=str,
         default="toy_mlp_mnist",
-        help="Registered task family name (see src.core.task_handler).",
+        help=(
+            "Registered task family name. "
+            f"Available: {', '.join(registered_task_names())}."
+        ),
     )
     p.add_argument(
         "--M",
@@ -514,7 +519,7 @@ def main() -> None:
     p.add_argument(
         "--baseline_algorithms",
         type=str,
-        default="max_compression,no_compression,uniform_compression,myopic,conservative,moving_average,lcb",
+        default="max_compression,no_compression,uniform_compression,myopic,conservative,moving_average",#lcb
         help=(
             "Comma-separated baseline algorithms to include. "
             "Use 'none' to disable all baselines. "
