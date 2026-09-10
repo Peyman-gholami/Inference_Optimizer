@@ -586,15 +586,6 @@ def build_tasks(
     s.num_links = num_links
     s.L_k       = num_nodes
 
-    # Apply llmint8 a_base correction before heterogeneous scaling so that
-    # _task_a() inherits the corrected base values.
-    # eta_min correction is applied per-task below (since task_eta_mins may differ).
-    base_comp = s.llm_activation_strategy or s.compressor
-    if not s._is_cross_backend():
-        a_base, _ = _llmint8_correct_a_and_eta_min(
-            a_base, s.eta_min, base_comp.lower() == "llmint8"
-        )
-
     s.a_base    = a_base
     s.tau       = tau
 
@@ -643,20 +634,10 @@ def build_tasks(
         em = s.task_eta_mins[k_idx] if (s._is_cross_backend()
                                          and k_idx < len(s.task_eta_mins)) else s.eta_min
 
-        # llmint8 correction: a_eff = a/2, eta_min_eff = max(eta_min, 0.5)
-        comp_k = (s.task_compressors[k_idx]
-                  if s._is_cross_backend() and k_idx < len(s.task_compressors)
-                  else (s.llm_activation_strategy or s.compressor))
-        is_llmint8_k = (comp_k.lower() == "llmint8")
-        a_k, em = _llmint8_correct_a_and_eta_min(a_k, em, is_llmint8_k)
-
         eta_min_d = {i: em for i in range(num_links)}
 
         r_k = s.R_k_per_task[k_idx] if k_idx < len(s.R_k_per_task) else s.R_k_per_task[-1]
-        if is_llmint8_k:
-            R_k_callable = make_llmint8_R_k_callable(r_k, a_k)
-        else:
-            R_k_callable = lambda t, *_, r=r_k: r
+        R_k_callable = lambda t, *_, r=r_k: r
 
         task = InferenceTask(
             task_id=task_id, b_k=0, L_k=num_nodes,
@@ -752,53 +733,6 @@ def _load_one_backend(
         cm, _DL(test_loader, device),
         sigma=s.mlp_sigma, N=s.mlp_N, n_samples=s.mlp_n_samples,
         flat_theta=None, device=device, compressor=compressor)
-
-
-def _llmint8_correct_a_and_eta_min(
-    a: dict, eta_min: float, is_llmint8: bool
-) -> tuple:
-    """
-    For llmint8: a_eff = a/2, eta_min_eff = max(eta_min, 0.5).
-    The constant INT8-floor delay is absorbed into an effective R_k
-    via make_llmint8_R_k_callable — see that function for derivation.
-    """
-    if not is_llmint8:
-        return a, eta_min
-    a_corr       = {k: v / 2.0 for k, v in a.items()}
-    eta_min_corr = max(eta_min, 0.5)
-    print("[multi] llmint8: a_eff=a/2, eta_min=max(eta_min,0.5) "
-          f"-> {eta_min_corr}", flush=True)
-    return a_corr, eta_min_corr
-
-
-def make_llmint8_R_k_callable(R_k: float, a: dict) -> Callable:
-    """
-    Build R_k_callable for llmint8 that corrects for the INT8 floor.
-
-    Actual delay:  D = a_i*(1+eta)/(2*c_i) = (a_i/2)*eta/c_i + a_i/(2*c_i)
-    With a_eff = a_i/2 the variable part is a_eff*eta/c_i.
-    The floor a_i/(2*c_i) is absorbed into the target:
-
-        1/R_k_eff_i = 1/R_k - a_i/(2*c_i)
-
-    Returns callable (t, c_t=None) -> float.
-    Returns inf if the floor alone exceeds 1/R_k (infeasible).
-    """
-    a_fp16 = {k: v * 2.0 for k, v in a.items()}  # recover original a from a_eff=a/2
-
-    def R_k_callable(t: int, c_t=None) -> float:
-        if c_t is None:
-            return R_k
-        R_eff_vals = []
-        for i, c_i in enumerate(c_t):
-            a_i   = a_fp16.get(i, list(a_fp16.values())[0])
-            slack = 1.0 / R_k - a_i / (2.0 * c_i) if c_i > 0 else -1.0
-            if slack <= 0:
-                return float("inf")
-            R_eff_vals.append(1.0 / slack)
-        return float(min(R_eff_vals))
-
-    return R_k_callable
 
 
 def _derive_a_tau_for_backend(backend: str, api: object) -> Tuple[Dict, Dict, int, int]:
@@ -900,11 +834,7 @@ def build_tasks_cross(s: MultiTaskExperimentSetting) -> List[InferenceTask]:
         eta_min = {i: eta_min_k for i in range(num_links)}
 
         r_k = s.R_k_per_task[k_idx] if k_idx < len(s.R_k_per_task) else s.R_k_per_task[-1]
-        is_llmint8_cross = (comp.lower() == "llmint8")
-        if is_llmint8_cross:
-            task_R_k_callable = make_llmint8_R_k_callable(r_k, a_k)
-        else:
-            task_R_k_callable = lambda t, *_, r=r_k: r
+        task_R_k_callable = lambda t, *_, r=r_k: r
 
         task = InferenceTask(
             task_id=task_id, b_k=0, L_k=num_nodes,

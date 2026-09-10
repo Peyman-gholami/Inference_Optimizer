@@ -439,79 +439,6 @@ def load_backend(s: ExperimentSetting):
 # Task builder
 # ============================================================================
 
-def _llmint8_correct_a_and_eta_min(
-    a: dict, eta_min: float, is_llmint8: bool
-) -> tuple:
-    """
-    For llmint8 the transmitted payload is a_i*(1+eta)/2 bytes.
-    We rewrite this as a_eff*eta where a_eff = a_i/2, and absorb the
-    constant INT8-floor term a_i/(2c) into the delay target via an
-    effective R_k that depends on c_t each slot (see make_llmint8_R_k_callable).
-
-    This function returns:
-      a_eff    = a_i / 2  (halved payload coefficient)
-      eta_min_eff = max(eta_min, 0.5)  (pure INT8 floor)
-
-    The R_k correction is handled separately by make_llmint8_R_k_callable.
-    """
-    if not is_llmint8:
-        return a, eta_min
-    a_corr       = {k: v / 2.0 for k, v in a.items()}
-    eta_min_corr = max(eta_min, 0.5)
-    print("[build_task] llmint8: a_eff=a/2, eta_min=max(eta_min,0.5)", flush=True)
-    print(f"  a: {[f'{a[k]:.0f}' for k in sorted(a)]} -> "
-          f"{[f'{a_corr[k]:.0f}' for k in sorted(a_corr)]}", flush=True)
-    print(f"  eta_min: {eta_min} -> {eta_min_corr}", flush=True)
-    return a_corr, eta_min_corr
-
-
-def make_llmint8_R_k_callable(
-    R_k: float,
-    a:   dict,
-) -> Callable:
-    """
-    Build R_k_callable for llmint8 that corrects for the INT8 floor.
-
-    The actual delay for llmint8 is:
-        D = a_i*(1+eta)/(2*c_i) = (a_i/2)*eta/c_i + a_i/(2*c_i)
-                                 = a_eff*eta/c_i  +  floor_i(c_i)
-
-    Absorbing the floor into the target:
-        D - 1/R_k = a_eff*eta/c_i - [1/R_k - a_i/(2*c_i)]
-                  = a_eff*eta/c_i - 1/R_k_eff_i(c_i)
-
-    where:
-        1/R_k_eff_i = 1/R_k - a_i/(2*c_i)
-        R_k_eff_i   = R_k / (1 - a_i*R_k/(2*c_i))
-
-    Returns a callable (t, c_t) -> float  (scalar, using link 0 as bottleneck)
-    or per-link array if needed.
-
-    If 1/R_k - a_i/(2*c_i) <= 0 for any link, the constraint is infeasible
-    regardless of eta (INT8 floor alone exceeds target delay) — returns inf.
-    """
-    a_fp16 = {k: v * 2.0 for k, v in a.items()}  # recover original a from a_eff=a/2
-
-    def R_k_callable(t: int, c_t: np.ndarray = None) -> float:
-        if c_t is None:
-            # Static fallback — ignore floor correction
-            return R_k
-        # Per-link effective R_k: use minimum (most constraining link)
-        R_eff_vals = []
-        for i, c_i in enumerate(c_t):
-            a_i     = a_fp16.get(i, list(a_fp16.values())[0])
-            inv_R   = 1.0 / R_k
-            floor_i = a_i / (2.0 * c_i) if c_i > 0 else float("inf")
-            slack   = inv_R - floor_i
-            if slack <= 0:
-                return float("inf")   # infeasible — floor exceeds target
-            R_eff_vals.append(1.0 / slack)
-        # Return the minimum effective R_k (tightest constraint across links)
-        return float(min(R_eff_vals))
-
-    return R_k_callable
-
-
 def build_task(s: ExperimentSetting, api) -> InferenceTask:
     """
     Build an InferenceTask from the api and setting.
@@ -527,13 +454,8 @@ def build_task(s: ExperimentSetting, api) -> InferenceTask:
         a         = {i: float(raw_a[i]) for i in range(num_links)}
         tau       = {i: 0.001 for i in range(num_nodes)}
 
-        is_llmint8 = (s.compressor.lower() == "llmint8")
-        a, eta_min_eff = _llmint8_correct_a_and_eta_min(a, s.eta_min, is_llmint8)
-        eta_min_d  = {i: eta_min_eff for i in range(num_links)}
-        if is_llmint8:
-            R_k_callable = make_llmint8_R_k_callable(s.R_k, a)
-        else:
-            R_k_callable = lambda t, *_, r=s.R_k: r
+        eta_min_d  = {i: s.eta_min for i in range(num_links)}
+        R_k_callable = lambda t, *_, r=s.R_k: r
 
         s.num_links        = num_links
         s.L_k              = num_nodes
@@ -564,18 +486,12 @@ def build_task(s: ExperimentSetting, api) -> InferenceTask:
         tau = {0: 0.01, 1: 0.01, 2: 0.01}
         a   = {0: 512.0, 1: 256.0}
 
-    is_llmint8 = (s.llm_activation_strategy.lower() == "llmint8")
-    a, eta_min_eff = _llmint8_correct_a_and_eta_min(
-        {k: float(v) for k, v in a.items()}, s.eta_min, is_llmint8
-    )
-    if is_llmint8:
-        R_k_callable = make_llmint8_R_k_callable(s.R_k, a)
-    else:
-        R_k_callable = lambda t, *_, r=s.R_k: r
+    a = {k: float(v) for k, v in a.items()}
+    R_k_callable = lambda t, *_, r=s.R_k: r
 
     num_links = 2
     num_nodes = 3
-    eta_min_d = {0: eta_min_eff, 1: eta_min_eff}
+    eta_min_d = {0: s.eta_min, 1: s.eta_min}
 
     s.num_links        = num_links
     s.L_k              = num_nodes
