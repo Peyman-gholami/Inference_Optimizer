@@ -42,6 +42,8 @@ Dependencies: torch, numpy
 """
 
 import torch
+
+from quant_levels import select_quant_level
 import numpy as np
 
 
@@ -423,17 +425,19 @@ class QuantizationCompressor(BaseCompressor):
     # ---- internal dispatch helpers ----
 
     def _select_compressor(self, k):
-        """Pick the sub-quantizer matching k value (default: FP16)."""
-        if abs(k - 0.0625) < 1e-6:
-            return self._int2
-        elif abs(k - 0.125) < 1e-6:
-            return self._int4
-        elif abs(k - 0.25) < 1e-6:
-            return self._int8
-        elif abs(k - 0.5) < 1e-6:
-            return self._fp16
-        else:
-            return self._fp16  # fallback
+        """Pick the sub-quantizer for ratio k. See src/core/quant_levels.py.
+
+        Was an exact 1e-6 match with an FP16 fallback, which made accuracy
+        non-monotone in k (asking for k=0.1 returned the highest-quality level)
+        and left the codec responsive on a set of measure ~1e-6, invisible to
+        any continuous perturbation. Now floors to the largest ratio <= k.
+        """
+        return {
+            "int2": self._int2,
+            "int4": self._int4,
+            "int8": self._int8,
+            "fp16": self._fp16,
+        }[select_quant_level(k)]
 
     def _dispatch_decompress(self, data):
         """Pick the sub-quantizer matching the stored method tag."""

@@ -46,6 +46,10 @@ import numpy as np
 
 AccuracyFn = Callable[[np.ndarray], float]
 
+# Below this, a spread in accuracy is float round-off rather than signal:
+# accuracy is correct/total, so the smallest real step is 1/n_eval >= 1e-5.
+_CONST_TOL = 1e-9
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -344,10 +348,36 @@ def summarize(
         mse = float(np.mean(diff ** 2))
         var_mc = float(np.mean(se ** 2))
         reg = regret_curve(a_ref, a_s, grid, cfg)
+
+        # R^2 = 1 - SS_res/SS_tot, to mirror Table 7. Note the normaliser is
+        # Var[A] over the grid, so this is meaningless the moment A is close to
+        # constant -- which is exactly the llmint8 regime, and what produced
+        # Table 7's -105348 and -inf entries. Reported faithfully rather than
+        # suppressed: -inf here is the honest reading of "A has no variance".
+        ss_tot = float(np.mean((a_ref - a_ref.mean()) ** 2))
+
+        # Accuracy is a ratio of counts, so any real variation is at least
+        # 1/n_eval. Anything below _CONST_TOL is float round-off from summing
+        # identical values, and must NOT be used as an R^2 normaliser -- doing
+        # so divides one rounding error by another and invents a finite-looking
+        # number (llmint8 produced R^2 = -7.18 from sd(A) = 1.1e-16 that way).
+        def _r2(num: float) -> float:
+            if ss_tot <= _CONST_TOL ** 2:
+                # A is constant: R^2 is -inf if the model still errs (Table 7's
+                # case), and undefined 0/0 if it does not (ours).
+                return float("-inf") if num > _CONST_TOL ** 2 else float("nan")
+            return 1.0 - num / ss_tot
+
+        r2 = _r2(mse)
+        r2_deb = _r2(max(mse - var_mc, 0.0))
+
         row = {
             "sigma": float(sigma),
             "rmse": float(np.sqrt(mse)),
             "rmse_debiased": float(np.sqrt(max(mse - var_mc, 0.0))),
+            "r2": r2,
+            "r2_debiased": r2_deb,
+            "sd_a": float(np.sqrt(ss_tot)),
             "max_abs_bias": float(np.max(np.abs(diff))),
             "mean_bias": float(diff.mean()),
             "regret_mean": reg["mean"],

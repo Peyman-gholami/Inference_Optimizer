@@ -51,6 +51,9 @@ TASK_MACRO = {
 METRICS = {
     "rmse":          (r"RMSE", "{:.4f}"),
     "rmse_debiased": (r"RMSE", "{:.4f}"),
+    "r2":            (r"$R^2$", "{:.4f}"),
+    "r2_debiased":   (r"$R^2$", "{:.4f}"),
+    "sd_a":          (r"sd$(A)$", "{:.4f}"),
     "max_abs_bias":  (r"max$|b|$", "{:.4f}"),
     "mean_bias":     (r"bias", "{:+.4f}"),
     "regret_mean":   (r"$\Delta\Phi$", "{:.4f}"),
@@ -61,7 +64,10 @@ METRICS = {
     "frac_decision_changed": (r"chg", "{:.2f}"),
 }
 
-DEFAULT_METRICS = ["rmse_debiased", "regret_mean", "rel_sd"]
+# Mirrors Table 7 (tab:fitting_acc_speed), minus its inference-latency
+# column: a Stein gradient costs 2N forward passes, which is not comparable
+# to a single surrogate prediction call.
+DEFAULT_METRICS = ["rmse_debiased", "r2_debiased"]
 
 PAPER_SIGMA = 0.05
 
@@ -82,8 +88,12 @@ def fmt(value, spec: str) -> str:
         f = float(value)
     except (TypeError, ValueError):
         return "--"
-    if f != f:  # NaN
+    if f != f:  # NaN -- undefined (e.g. R^2 with zero residual AND zero variance)
         return "--"
+    if f == float("inf"):
+        return r"$\infty$"
+    if f == float("-inf"):
+        return r"$-\infty$"
     return spec.format(f)
 
 
@@ -202,18 +212,22 @@ def main():
                    help=f"Comma-separated subset of {sorted(METRICS)}")
     p.add_argument("--label", default="tab:stein_smoothing")
     p.add_argument("--caption", default=(
-        r"What the Stein oracle sees. Stein's identity estimates "
-        r"$\nabla \tilde{A}_\sigma$, the gradient of the Gaussian-smoothed "
-        r"accuracy $\tilde{A}_\sigma(\bm{\eta})=\mathbb{E}_{\bm z}"
-        r"[A(\bm{\eta}+\sigma \bm z)]$, rather than $\nabla A$ -- with hard "
-        r"top-$k$ the latter does not exist. We report the smoothing bias "
-        r"RMSE$(\tilde{A}_\sigma, A)$ (Monte-Carlo-variance debiased), the "
-        r"controller's regret $\Delta\Phi$ from maximising $\tilde{A}_\sigma$ "
-        r"instead of $A$ (averaged over the price sweep the No-CSI primal step "
-        r"traverses), and the seed-to-seed relative spread sd$(\hat g)$ of the "
-        r"Stein gradient at the scenario's own $N$. Bias grows with $\sigma$ "
-        r"while the gradient's variance falls, so the two move in opposite "
-        r"directions; $\bm{\sigma=0.05}$ is the value used in the experiments."))
+        r"Fidelity of the function the Stein oracle sees. Stein's identity does "
+        r"not approximate $A$; it estimates $\nabla \tilde{A}_\sigma$, the "
+        r"gradient of the Gaussian-smoothed accuracy "
+        r"$\tilde{A}_\sigma(\bm{\eta})=\mathbb{E}_{\bm z}[A(\bm{\eta}+\sigma "
+        r"\bm z)]$ -- with hard top-$k$ the kept coordinate set changes only at "
+        r"$k=\lceil \eta a\rceil$, so $\nabla A$ does not exist. We therefore "
+        r"report the same fit-quality measures as Table~\ref{tab:fitting_acc_speed}, "
+        r"RMSE and $R^2$, for $\tilde{A}_\sigma$ against $A$ over the $\bm{\eta}$ "
+        r"grid, as a function of the smoothing scale $\sigma$; "
+        r"$\bm{\sigma=0.05}$ is the value used in the experiments. The "
+        r"inference-latency column of Table~\ref{tab:fitting_acc_speed} has no "
+        r"counterpart here: a Stein gradient costs $2N$ forward passes through the "
+        r"model rather than a single surrogate prediction call. As in "
+        r"Table~\ref{tab:fitting_acc_speed}, $R^2$ is normalised by "
+        r"$\mathrm{Var}[A]$ over the grid and is therefore uninformative where $A$ "
+        r"is near-constant; $-\infty$ denotes exactly zero variance."))
     args = p.parse_args()
 
     metrics = [m.strip() for m in args.metrics.split(",") if m.strip()]

@@ -46,6 +46,8 @@ Dependencies: torch  (numpy not required)
 
 import torch
 
+from quant_levels import select_quant_level
+
 
 # ============================================================================
 # Base class
@@ -325,7 +327,7 @@ class GPUQuantizationCompressor(GPUBaseCompressor):
         0.25   → INT8   (4×)
         0.125  → INT4   (8×)
         0.0625 → INT2   (16×)
-        other  → FP16   (fallback)
+        in between → floored to the next ratio down
 
     All sub-quantizers operate entirely on the tensor's device.
     """
@@ -337,11 +339,19 @@ class GPUQuantizationCompressor(GPUBaseCompressor):
         self._int2 = _GPUQuanInt2()
 
     def _select(self, k: float):
-        if   k < 0.0625+ 1e-6: return self._int2
-        elif k < 0.125+1e-6: return self._int4
-        elif k < 0.25+1e-6: return self._int8
-        elif k < 0.5+1e-6: return self._fp16
-        else:                         return self._fp16
+        """Pick the sub-quantizer for ratio k. See src/core/quant_levels.py.
+
+        Previously this ladder *ceilinged* (k=0.3 was delivered at ratio 0.5),
+        so the link carried more than the a_i*eta_i the delay model assumed.
+        Now shares the floor rule with the CPU path -- the two used to
+        disagree, which is how the CPU path's non-monotonicity went unnoticed.
+        """
+        return {
+            "int2": self._int2,
+            "int4": self._int4,
+            "int8": self._int8,
+            "fp16": self._fp16,
+        }[select_quant_level(k)]
 
     def _dispatch(self, data: dict):
         m = data.get('method', '')

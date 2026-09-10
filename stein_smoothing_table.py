@@ -120,17 +120,28 @@ def build_backend(args):
         "device": str(api.device),
         "batch_size": args.batch_size,
         "fast_batches": args.fast_batches,
+        "n_repeat": args.n_repeat,
         "fast_eval_images": args.batch_size * args.fast_batches,
         "true_eval_images": n_true,
     }
     return api.accuracy_callable, api.accuracy_callable_true, api.num_links, meta
 
 
-def measure(acc_fn, grid, label):
+def measure(acc_fn, grid, label, n_repeat=1):
+    """A over the grid, averaged over n_repeat evaluations per point.
+
+    Needed because the INT4 quantizer uses *stochastic rounding*, so A is a
+    random variable at fixed eta (sd ~0.017 on a 200-image subset) even though
+    INT2/INT8/FP16 are deterministic. A single draw would inflate the RMSE
+    columns by roughly that much -- the same size as the top-k bias at
+    sigma=0.05. top-k and llmint8 are deterministic, so n_repeat=1 is fine
+    there and is the default.
+    """
     vals = np.empty(len(grid))
     t0 = time.time()
     for i, eta in enumerate(grid):
-        vals[i] = acc_fn(eta)
+        vals[i] = (acc_fn(eta) if n_repeat == 1
+                   else float(np.mean([acc_fn(eta) for _ in range(n_repeat)])))
         if (i + 1) % max(1, len(grid) // 10) == 0:
             print(f"  {label}: {i+1}/{len(grid)}", flush=True)
     print(f"  {label} done in {time.time()-t0:.1f}s  "
@@ -170,8 +181,10 @@ def main():
     p.add_argument("--eta_min", type=float, default=0.1)
     p.add_argument("--eta_axis", default="",
                    help="Explicit per-axis eta values, overriding the linspace. "
-                        "Required for quantization, which only responds on its "
-                        "ladder: 0.0625,0.125,0.25,0.5,1.0")
+                        "No longer needed for quantization: since the eta->level "
+                        "mapping was fixed to floor (src/core/quant_levels.py), a "
+                        "uniform grid works and is preferable, as it samples "
+                        "inside each level rather than only on its boundary.")
     p.add_argument("--n_draws", type=int, default=200,
                    help="MC draws per (eta, sigma) for A_sigma.")
     p.add_argument("--batch_size", type=int, default=100)
@@ -179,6 +192,9 @@ def main():
                    help="Batches per fast eval; fast_batches*batch_size images.")
     p.add_argument("--true_batches", default="all",
                    help="Batches for the A baseline ('all' = full 10k test set).")
+    p.add_argument("--n_repeat", type=int, default=1,
+                   help="Evaluations averaged per baseline grid point. Use >1 "
+                        "for quantization (INT4 uses stochastic rounding).")
     p.add_argument("--device", default="auto",
                    help="auto (cuda>mps>cpu) | cuda | mps | cpu")
 
@@ -234,8 +250,8 @@ def main():
     print(f"[1/3] A baselines "
           f"({meta['true_eval_images']} images, and the {meta['fast_eval_images']}-image "
           f"subset used for A_sigma)")
-    a_true = measure(true_fn, grid, "A_true")
-    a_fast = measure(fast_fn, grid, "A_fast")
+    a_true = measure(true_fn, grid, "A_true", args.n_repeat)
+    a_fast = measure(fast_fn, grid, "A_fast", args.n_repeat)
     offset = a_fast - a_true
     print(f"  fast-subset offset: mean {offset.mean():+.4f}  "
           f"sd {offset.std():.4f}  max|.| {np.abs(offset).max():.4f}\n"
