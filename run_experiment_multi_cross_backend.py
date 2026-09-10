@@ -659,7 +659,7 @@ def build_tasks(
         R_k_callable = lambda t, *_, r=r_k: r
 
         task = InferenceTask(
-            task_id=task_id, b_k=0, L_k=ref_num_nodes,  # shared topology
+            task_id=task_id, b_k=0, L_k=num_nodes,
             tau=tau, a=a_k,
             eta_min=eta_min_d,
             R_k_callable=R_k_callable,
