@@ -71,7 +71,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, asdict, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib
