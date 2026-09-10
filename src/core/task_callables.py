@@ -30,32 +30,41 @@ class InferenceTaskCallables:
     flat_theta  : Tensor or None   -- fixed theta to evaluate at.
                                       If None, uses model's current weights.
     device      : torch.device
+    compressor  : None | str | BaseCompressor
+                  Compression backend forwarded to CompressedModel.set_compressor()
+                  when provided.  Accepted values:
+                      None / 'topk'      -> TopKCompressor  (default)
+                      'quantization'     -> QuantizationCompressor
+                      'llmint8'          -> LLMInt8Compressor
 
     Usage
     -----
     api = InferenceTaskCallables(cm, test_loader, sigma=0.05, N=50)
+    api = InferenceTaskCallables(cm, test_loader, sigma=0.05, N=50,
+                                 compressor='quantization')
 
     task = InferenceTask(
         ...,
         accuracy_callable  = api.accuracy_callable,
         gradient_callable  = api.gradient_callable,
     )
-
-    # or access directly:
-    acc  = api.accuracy_callable(eta_np)    # np.ndarray -> float
-    grad = api.gradient_callable(eta_np)    # np.ndarray -> np.ndarray
     """
 
     def __init__(self, cm: CompressedModel, test_loader: DataLoader,
                  sigma: float = 0.05, N: int = 50,
                  n_samples: int = 512,
                  flat_theta: torch.Tensor = None,
-                 device=None):
+                 device=None,
+                 compressor=None):
         self.cm          = cm
         self.sigma       = sigma
         self.N           = N
         self.flat_theta  = flat_theta
         self.device      = device or next(cm.parameters()).device
+
+        # Apply compressor selection if provided
+        if compressor is not None:
+            cm.set_compressor(compressor)
 
         self.A = AccuracyFunction(cm, test_loader,
                                   n_samples=n_samples, device=self.device)
@@ -142,7 +151,7 @@ def main():
                                  flat_theta=flat_theta, device=device)
 
     # -- wire into InferenceTask --
-    from task import InferenceTask   # the provided class
+    from .task import InferenceTask   # the provided class
 
     task = InferenceTask(
         task_id          = 0,
