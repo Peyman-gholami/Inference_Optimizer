@@ -250,13 +250,11 @@ def _run_partitioned(
                     # No compression — pass through
                     compressed_bytes = original_bytes
                 else:
-                    # Build compressor params: TopK/Quant take float, LLMInt8 takes list
-                    name = compressor.get_name().lower()
-                    if 'llmint8' in name or 'llm' in name:
-                        params = [eta, 'fp16', 'int8']
-                    else:
-                        params = eta
-                    
+                    # Every compressor takes the scalar eta: topk as keep
+                    # fraction, quantization as requested payload ratio, and
+                    # llmint8 as target bit-width / 16 (mixed_precision.py).
+                    params = eta
+
 
                     if _is_gpu_compressor(compressor):
                         # GPU-native path — tensor stays on device throughout

@@ -55,102 +55,17 @@ def _topk_mask_by_abs(flat_abs: torch.Tensor, k: int) -> torch.Tensor:
 
 # ---------------------------------------------------------------------------
 # Mixed-precision activation compression where eta IS the compression ratio.
-#
-# Two strategies share the machinery below. In both, eta is the target average
-# bit-width relative to the FP16 activation baseline (target_bits = 16 * eta),
-# so eta is a true compression ratio on the same [0, 1] axis as topk_per_token.
-# Elements are split by magnitude into a high-precision and a low-precision
-# band; the largest-magnitude ("outlier") elements always get high precision.
-#
-#   llmint8_adjacent : the two bands are *neighbouring* rungs of the ladder
-#                      (fp16/int8, int8/int4, int4/int2, int2/drop). Only the
-#                      boundary between two adjacent precisions ever moves, so
-#                      composition is continuous across eta -> smoothest curve.
-#   llmint8_reserve  : the high band is *always* FP16 (protected outliers); the
-#                      low band steps down int8 -> int4 -> int2 -> drop as eta
-#                      decreases. Keeps a permanent FP16 slice at the cost of a
-#                      composition jump each time the low band changes rung.
+# The ladder now lives in mixed_precision.py so the ResNet backend can use it
+# without importing this transformers-dependent module. eta is the target
+# average bit-width relative to FP16 (target_bits = 16 * eta), so the
+# delivered payload fraction equals eta.
 # ---------------------------------------------------------------------------
-
-# (name, bits) rungs ordered low -> high.
-_PRECISION_LADDER = [("drop", 0), ("int2", 2), ("int4", 4), ("int8", 8), ("fp16", 16)]
-_QUANT_LEVELS = {"int8": 127.0, "int4": 7.0, "int2": 1.0}
-
-# Minimum FP16-outlier fraction for the fp16_reserve scheme. Without this, f_high
-# evaluates to exactly 0 at the phase-bottom etas (0.5 -> all int8, 0.25 -> all int4,
-# 0.125 -> all int2): the scheme then keeps NO outliers in FP16 and the unprotected
-# low-precision activations collapse the model (score -> 0 at those exact etas).
-# Flooring guarantees outliers are always FP16-protected, in the spirit of LLM.int8()'s
-# ~0.1-1% outlier rate. Costs a negligible (<0.3%) deviation of eta from the exact ratio.
-_FP16_RESERVE_FLOOR = 0.005
-
-
-def _quantize_band(x: torch.Tensor, precision: str) -> torch.Tensor:
-    """Deterministic symmetric per-group abs-max (de)quantization.
-
-    Returns dequantized float32 values with the same shape as `x`. Deterministic
-    rounding (no stochastic noise) keeps the eta->score landscape smooth, which
-    the concavity analysis relies on.
-    """
-    if precision == "fp16":
-        return x.half().float()
-    if precision == "drop":
-        return torch.zeros_like(x)
-    levels = _QUANT_LEVELS[precision]
-    scale = (x.abs().max() / levels).clamp(min=1e-8)
-    return (x / scale).round().clamp(-levels, levels) * scale
-
-
-def _mixed_precision_select(eta: float, scheme: str):
-    """Pick (low_precision, high_precision, f_high) for target bits b = 16*eta.
-
-    `f_high` is the fraction of (largest-magnitude) elements placed in the
-    high-precision band; the rest go in the low-precision band.
-    """
-    b = 16.0 * float(eta)
-    if scheme == "fp16_reserve":
-        if   b >= 8.0: low_bits = 8;  low = "int8"
-        elif b >= 4.0: low_bits = 4;  low = "int4"
-        elif b >= 2.0: low_bits = 2;  low = "int2"
-        else:          low_bits = 0;  low = "drop"
-        f_high = (b - low_bits) / (16.0 - low_bits)
-        # Never drop FP16 outlier protection entirely (see _FP16_RESERVE_FLOOR).
-        f_high = max(f_high, _FP16_RESERVE_FLOOR)
-        return low, "fp16", f_high
-    # adjacent-rung: bracket b between neighbouring ladder rungs.
-    for i in range(len(_PRECISION_LADDER) - 1):
-        lo_name, lo_bits = _PRECISION_LADDER[i]
-        hi_name, hi_bits = _PRECISION_LADDER[i + 1]
-        if lo_bits <= b <= hi_bits:
-            f_high = (b - lo_bits) / (hi_bits - lo_bits)
-            return lo_name, hi_name, f_high
-    return "fp16", "fp16", 1.0  # b >= 16
-
-
-def _mixed_precision_quantize(hidden: torch.Tensor, eta: float, scheme: str) -> torch.Tensor:
-    """Two-tier mixed-precision activation quantization (see module note above)."""
-    original_dtype = hidden.dtype
-    flat = hidden.reshape(-1).float()
-    N = flat.numel()
-
-    low_prec, high_prec, f_high = _mixed_precision_select(eta, scheme)
-    f_high = min(max(f_high, 0.0), 1.0)
-    n_high = int(round(f_high * N))
-
-    if n_high <= 0:
-        out = _quantize_band(flat, low_prec)
-    elif n_high >= N:
-        out = _quantize_band(flat, high_prec)
-    else:
-        absf = flat.abs()
-        # Threshold above which the top-n_high magnitudes lie (GPU-native).
-        thresh = torch.kthvalue(absf, N - n_high).values
-        hi_mask = absf > thresh
-        out = torch.empty_like(flat)
-        out[hi_mask] = _quantize_band(flat[hi_mask], high_prec)
-        out[~hi_mask] = _quantize_band(flat[~hi_mask], low_prec)
-
-    return out.reshape_as(hidden).to(original_dtype)
+from .mixed_precision import (
+    SCHEME_ADJACENT,
+    SCHEME_RESERVE,
+    default_scheme,
+    mixed_precision_quantize,
+)
 
 
 @dataclass(frozen=True)
@@ -175,11 +90,12 @@ class LLMActivationCompressor:
     topk_per_token   : top-k per token position along hidden_dim
     random           : Bernoulli mask with deterministic seed
     quantization     : symmetric uniform quantisation snapped to nearest bitwidth
-    llmint8          : GPU-native LLM.int8()-style mixed-precision via
-                       GPULLMInt8Compressor (gpu_compressors.py).
-                       eta is used as the outlier_ratio (top-eta fraction kept
-                       in FP16; remaining values quantised to INT8).
-                       Requires COMPRESSOR_BACKEND=gpu and gpu_compressors.py.
+    llmint8          : LLM.int8()-style two-band mixed precision via the
+                       mixed_precision.py ladder. eta is the payload fraction
+                       (target_bits = 16 * eta), so the a_i * eta_i delay model
+                       holds. Scheme from LLMINT8_SCHEME, default fp16_reserve.
+    llmint8_adjacent : the ladder pinned to neighbouring rungs.
+    llmint8_reserve  : the ladder pinned to FP16-protected outliers.
     """
 
     def __init__(
@@ -198,24 +114,17 @@ class LLMActivationCompressor:
         # Persist eta as floats for cheap .item()-free access in hooks.
         self._eta: List[float] = [1.0 for _ in range(self.d)]
 
-        # GPU-native LLMInt8 compressor — instantiated once and reused across
-        # all hook calls to avoid repeated object creation in the forward pass.
-        self._gpu_llmint8 = None
+        # 'llmint8' resolves to the mixed-precision ladder, whose scheme is
+        # fixed once here (LLMINT8_SCHEME) rather than per hook call.
+        self._llmint8_scheme = None
         if config.strategy == "llmint8":
-            try:
-                from .gpu_compressors import GPULLMInt8Compressor
-                self._gpu_llmint8 = GPULLMInt8Compressor()
-                print(
-                    "[LLMActivationCompressor] strategy=llmint8  "
-                    "backend=gpu  path=GPU-native (no CPU round-trip)",
-                    flush=True,
-                )
-            except ImportError:
-                raise ImportError(
-                    "LLM_ACTIVATION_STRATEGY=llmint8 requires gpu_compressors.py. "
-                    "Ensure gpu_compressors.py is on sys.path and "
-                    "COMPRESSOR_BACKEND=gpu is set."
-                )
+            self._llmint8_scheme = default_scheme()
+            print(
+                f"[LLMActivationCompressor] strategy=llmint8  "
+                f"scheme={self._llmint8_scheme}  eta=payload fraction "
+                f"(target_bits=16*eta)",
+                flush=True,
+            )
 
         handles: List[torch.utils.hooks.RemovableHandle] = []
         for local_i, layer_idx in enumerate(config.layer_indices):
@@ -248,28 +157,18 @@ class LLMActivationCompressor:
             return torch.zeros_like(hidden)
 
         if self.config.strategy == "llmint8":
-            # GPU-native LLM.int8()-style mixed-precision compression.
-            # eta is used as the outlier_ratio: top-eta fraction of elements
-            # are kept in FP16, the rest are quantised to INT8.
-            # The tensor stays on its device throughout — no CPU round-trip.
-            # Clamp eta to [0, 1] to satisfy GPULLMInt8Compressor's quantile range.
-            original_dtype = hidden.dtype
-            outlier_ratio = float(max(0.0, min(1.0, eta)))
-            params = [outlier_ratio, 'fp16', 'int8']
-            comp_data = self._gpu_llmint8.compress(hidden, params)
-            restored = self._gpu_llmint8.decompress(comp_data, device=hidden.device)
-            # GPULLMInt8Compressor dequantises to float32. Cast back to the
-            # model's working dtype (float16 for Gemma/Llama on GPU) so the
-            # next decoder layer receives the expected dtype.
-            return restored.to(original_dtype)
+            # eta = payload fraction; the ladder derives the two-band split.
+            # mixed_precision_quantize preserves the input dtype, so the next
+            # decoder layer receives what it expects.
+            return mixed_precision_quantize(hidden, eta, self._llmint8_scheme)
 
         if self.config.strategy == "llmint8_adjacent":
             # eta = compression ratio; adjacent ladder rungs, smoothest curve.
-            return _mixed_precision_quantize(hidden, eta, "adjacent")
+            return mixed_precision_quantize(hidden, eta, SCHEME_ADJACENT)
 
         if self.config.strategy == "llmint8_reserve":
             # eta = compression ratio; FP16-protected outliers, descending base.
-            return _mixed_precision_quantize(hidden, eta, "fp16_reserve")
+            return mixed_precision_quantize(hidden, eta, SCHEME_RESERVE)
 
         if self.config.strategy == "quantization":
             # Fake (post-training) activation quantization controlled by eta.

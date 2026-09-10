@@ -46,6 +46,12 @@ Dependencies: torch  (numpy not required)
 
 import torch
 
+from .mixed_precision import (
+    default_scheme,
+    mixed_precision_quantize,
+    payload_bytes,
+)
+
 
 # ============================================================================
 # Base class
@@ -550,6 +556,66 @@ class GPULLMInt8Compressor(GPUBaseCompressor):
 # Convenience factory
 # ============================================================================
 
+# ============================================================================
+# Ladder LLM.int8 Compressor  (eta = payload fraction)
+# ============================================================================
+
+class GPULadderInt8Compressor(GPUBaseCompressor):
+    """LLM.int8-style two-band mixed precision where eta IS the payload fraction.
+
+    compression_params : float  eta in [0, 1]
+        Interpreted as the target average bit-width relative to FP16,
+        target_bits = 16 * eta, and split across two ladder rungs by
+        src/core/mixed_precision.py. Delivered payload fraction equals eta
+        (exactly for scheme 'adjacent'), so the controller's a_i * eta_i delay
+        model holds without any correction.
+
+        A list/tuple is accepted and its first element used, so call sites that
+        still pass [eta, outlier_precision, regular_precision] keep working;
+        the precision names are ignored -- the ladder derives them from eta.
+
+    Contrast with GPULLMInt8Compressor, which takes eta as the FP16-outlier
+    fraction and therefore delivers a*(1+eta)/2. That one is reachable as
+    'llmint8_outlier' for reproducing runs that used it.
+    """
+
+    def __init__(self, scheme: str = None):
+        self.scheme = scheme or default_scheme()
+
+    @staticmethod
+    def _eta(compression_params) -> float:
+        eta = (compression_params[0]
+               if isinstance(compression_params, (list, tuple))
+               else compression_params)
+        return min(max(float(eta), 0.0), 1.0)
+
+    def compress(self, tensor, compression_params) -> dict:
+        eta  = self._eta(compression_params)
+        n    = int(tensor.numel())
+        # Anchor the bit budget to the activation's own width so that
+        # delivered_bytes / original_bytes == eta for any dtype.
+        base = 8 * tensor.element_size()
+        return {
+            'method':           'gpu_ladder_int8',
+            'tensor':           mixed_precision_quantize(tensor, eta, self.scheme),
+            'shape':            tuple(tensor.shape),
+            'n_elements':       n,
+            'eta':              eta,
+            'scheme':           self.scheme,
+            'compressed_bytes': payload_bytes(eta, self.scheme, n, base),
+        }
+
+    def decompress(self, compressed: dict, device=None):
+        t = compressed['tensor']
+        return t.to(device) if device is not None else t
+
+    def get_compressed_size(self, compressed: dict) -> int:
+        return int(compressed['compressed_bytes'])
+
+    def get_name(self) -> str:
+        return "GPULadderInt8Compressor({})".format(self.scheme)
+
+
 def get_gpu_compressor(name: str) -> GPUBaseCompressor:
     """
     Factory function — mirrors get_compressor() in compressors.py.
@@ -571,11 +637,13 @@ def get_gpu_compressor(name: str) -> GPUBaseCompressor:
     elif n in ('quantization', 'quant'):
         return GPUQuantizationCompressor()
     elif n in ('llmint8', 'llm_int8', 'llm.int8'):
+        return GPULadderInt8Compressor()
+    elif n in ('llmint8_outlier', 'llm_int8_outlier'):
         return GPULLMInt8Compressor()
     else:
         raise ValueError(
             f"Unknown GPU compressor '{name}'. "
-            f"Choose from: topk, quantization, llmint8"
+            f"Choose from: topk, quantization, llmint8, llmint8_outlier"
         )
 
 

@@ -52,10 +52,15 @@ def _make_compressor(compressor):
     BaseCompressor instance -> used as-is (CPU path)
     GPUBaseCompressor inst. -> used as-is (GPU path)
 
-    LLMInt8 is intentionally excluded for the MLP backend.  Its row-wise
-    AbsMax scaling assumes a transformer [batch, seq_len, hidden_dim] layout.
-    MLP activations are 1-D vectors after each ReLU — a fundamentally
-    different shape — so LLMInt8 does not apply here.
+    'llmint8'               -> LadderInt8Compressor
+    'llmint8_outlier'       -> rejected (see below)
+
+    'llmint8' is accepted here: the mixed_precision.py ladder flattens the
+    tensor and makes no layout assumption, so it applies to MLP activations
+    as readily as to transformer hidden states.  'llmint8_outlier' remains
+    excluded — its row-wise AbsMax scaling assumes a transformer
+    [batch, seq_len, hidden_dim] layout, whereas MLP activations are 1-D
+    vectors after each ReLU.
     """
     if not _COMPRESSORS_AVAILABLE and _COMPRESSOR_BACKEND == 'cpu':
         instance = _BuiltinTopKCompressor()
@@ -65,11 +70,12 @@ def _make_compressor(compressor):
 
     if isinstance(compressor, str):
         name = compressor.strip().lower()
-        if name in ('llmint8', 'llm_int8', 'llm.int8'):
+        if name in ('llmint8_outlier', 'llm_int8_outlier'):
             raise ValueError(
                 f"COMPRESSOR_TYPE='{compressor}' is not supported for the MLP backend. "
-                f"Choose from: topk, quantization.  "
-                f"(LLMInt8 is designed for transformer hidden states, not MLP activations.)"
+                f"Choose from: topk, quantization, llmint8.  "
+                f"(The outlier-fraction LLMInt8 assumes transformer hidden states; "
+                f"use 'llmint8' for the layout-agnostic mixed-precision ladder.)"
             )
         instance = _registry_get_compressor(name)
     elif compressor is None:
@@ -136,20 +142,10 @@ def _compress_decompress(compressor, x: torch.Tensor, eta: float) -> torch.Tenso
 
     device = x.device
 
-    # Build compression_params depending on compressor type
-    name = compressor.get_name().lower() if hasattr(compressor, 'get_name') else ''
-    if 'llmint8' in name or 'llm' in name:
-        # η_optimizer ∈ [0.5, 1] represents the effective payload fraction:
-        #   transmitted_bytes = a_i × η_optimizer
-        #   = a_i × (1 + outlier_ratio) / 2
-        # → outlier_ratio = 2 × η_optimizer - 1 ∈ [0, 1]
-        # This ensures the optimizer's delay model a_i × η / c is correct.
-        # η_optimizer < 0.5 is infeasible (pure INT8 is the floor) and is
-        # clamped to 0 outlier_ratio (pure INT8).
-        outlier_ratio = max(0.0, min(1.0, 2.0 * eta - 1.0))
-        params = [outlier_ratio, 'fp16', 'int8']
-    else:
-        params = eta
+    # Every compressor takes the scalar eta. For llmint8 the mixed_precision.py
+    # ladder reads it as target bit-width / 16, so the delivered payload
+    # fraction is eta and no remap is needed here.
+    params = eta
 
     if _is_gpu_compressor(compressor):
         # GPU-native path — tensor stays on device throughout
