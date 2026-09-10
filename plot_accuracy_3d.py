@@ -41,7 +41,7 @@ from mpl_toolkits.mplot3d import Axes3D   # noqa: F401
 _root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _root)
 
-from knn_accuracy_model import KNNAccuracyModel
+from src.core.knn_accuracy_model import KNNAccuracyModel
 
 
 # ─────────────────────────────────────────────────────────────────────────────

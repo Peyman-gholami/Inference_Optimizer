@@ -18,7 +18,7 @@ scripts (3D plots, concavity analysis, paper figures).
 
 Usage
 -----
-    from knn_accuracy_model import KNNAccuracyModel
+    from src.core.knn_accuracy_model import KNNAccuracyModel
 
     # Fit
     model = KNNAccuracyModel(k=5, distance='euclidean')

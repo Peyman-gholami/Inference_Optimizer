@@ -9,7 +9,7 @@ import torch
 
 from src.core.llm_compression import ActivationCompressionConfig, LLMActivationCompressor
 from src.core.mmlu_eval import MMLUEvalConfig, MMLUEvaluator
-from gradient_oracles import GradientOracle, SteinGradientOracle, \
+from .gradient_oracles import GradientOracle, SteinGradientOracle, \
     AccuracyPredictor, PredictorGradientOracle
 
 

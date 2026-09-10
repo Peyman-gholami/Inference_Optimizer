@@ -43,7 +43,7 @@ _root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _root)
 sys.path.insert(0, os.path.join(_root, "src", "core"))
 
-from gradient_oracles import AccuracyPredictor
+from src.core.gradient_oracles import AccuracyPredictor
 
 
 def main():

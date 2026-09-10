@@ -505,7 +505,11 @@ class AccuracyPredictor:
              device: str = "cuda" if torch.cuda.is_available() else "cpu"
              ) -> "AccuracyPredictor":
         """Load a previously saved predictor."""
-        ckpt       = torch.load(path, map_location=device)
+        # weights_only=False: these checkpoints carry the numpy eta_data/acc_data
+        # grids alongside the state_dict, which the torch>=2.6 default
+        # (weights_only=True) refuses to unpickle. The files are this repo's own
+        # committed artifacts.
+        ckpt       = torch.load(path, map_location=device, weights_only=False)
         predictor  = cls(
             num_links  = ckpt["num_links"],
             eta_min    = ckpt["eta_min"],
